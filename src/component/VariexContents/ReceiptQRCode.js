@@ -75,10 +75,10 @@ export default function ReceiptQRCode({ singleReceipt = null }) {
       });
   }, [storeId]);
 
-  // Fetch sale groups
-  useEffect(() => {
-    if (!storeId || singleReceipt) return;
-    supabase
+useEffect(() => {
+  if (!storeId || singleReceipt) return;
+  const fetchSaleGroups = async () => {
+    const { data, error } = await supabase
       .from('sale_groups')
       .select(`
         id,
@@ -86,6 +86,7 @@ export default function ReceiptQRCode({ singleReceipt = null }) {
         total_amount,
         payment_method,
         created_at,
+        customer_id,
         dynamic_sales (
           id,
           device_id,
@@ -101,84 +102,118 @@ export default function ReceiptQRCode({ singleReceipt = null }) {
         )
       `)
       .eq('store_id', storeId)
-      .order('created_at', { ascending: false })
-      .then(({ data, error }) => {
-        if (error) {
-          console.error('Error fetching sale groups:', error);
-          toast.error('Failed to fetch sale groups.');
-          return;
-        }
-        setSaleGroupsList(data || []);
-      });
-  }, [storeId, singleReceipt]);
-
-  // Fetch or create receipts for selected sale group
-  useEffect(() => {
-    if (!selectedSaleGroup) {
-      setReceipts([]);
+      .order('created_at', { ascending: false });
+    if (error) {
+      console.error('Error fetching sale groups:', error);
+      toast.error('Failed to fetch sale groups.');
       return;
     }
-    (async () => {
-      let { data: receiptData } = await supabase
-        .from("receipts")
-        .select("*")
-        .eq("sale_group_id", selectedSaleGroup.id)
-        .order('id', { ascending: false });
+    setSaleGroupsList(data || []);
+    // Automatically select the latest sale group if none is selected
+    if (data.length > 0 && !selectedSaleGroup) {
+      setSelectedSaleGroup(data[0]);
+    }
+  };
 
-      if (receiptData.length === 0 && selectedSaleGroup.dynamic_sales?.length > 0) {
-        const firstSale = selectedSaleGroup.dynamic_sales[0];
-        const totalQuantity = selectedSaleGroup.dynamic_sales.reduce((sum, sale) => sum + sale.quantity, 0);
-        const totalAmount = selectedSaleGroup.dynamic_sales.reduce((sum, sale) => sum + sale.amount, 0);
-        const receiptInsert = {
-          store_receipt_id: selectedSaleGroup.store_id,
-          sale_group_id: selectedSaleGroup.id,
-          product_id: firstSale.dynamic_product.id,
-          sales_amount: totalAmount,
-          sales_qty: totalQuantity,
-          product_name: firstSale.dynamic_product.name,
-          device_id: firstSale.device_id || null,
-          customer_name: "",
-          customer_address: "",
-          phone_number: "",
-          warranty: "",
-          date: new Date(selectedSaleGroup.created_at).toISOString(),
-          receipt_id: `RCPT-${selectedSaleGroup.id}-${Date.now()}`
-        };
+  fetchSaleGroups();
 
-        const { data: newReceipt, error } = await supabase
-          .from("receipts")
-          .insert([receiptInsert])
-          .select()
+  // Subscribe to real-time inserts on sale_groups
+  const subscription = supabase
+    .channel('sale_groups_channel')
+    .on('postgres_changes', 
+      { event: 'INSERT', schema: 'public', table: 'sale_groups', filter: `store_id=eq.${storeId}` },
+      (payload) => {
+        fetchSaleGroups();
+      }
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(subscription);
+  };
+}, [storeId, singleReceipt, selectedSaleGroup]);
+
+useEffect(() => {
+  if (!selectedSaleGroup) {
+    setReceipts([]);
+    return;
+  }
+  (async () => {
+    let { data: receiptData } = await supabase
+      .from("receipts")
+      .select("*")
+      .eq("sale_group_id", selectedSaleGroup.id)
+      .order('id', { ascending: false });
+
+    if (receiptData.length === 0 && selectedSaleGroup.dynamic_sales?.length > 0) {
+      const firstSale = selectedSaleGroup.dynamic_sales[0];
+      const totalQuantity = selectedSaleGroup.dynamic_sales.reduce((sum, sale) => sum + sale.quantity, 0);
+      const totalAmount = selectedSaleGroup.dynamic_sales.reduce((sum, sale) => sum + sale.amount, 0);
+
+      let customer_name = "";
+      let phone_number = "";
+      let customer_address = "";
+      if (selectedSaleGroup.customer_id) {
+        const { data: customer, error: customerError } = await supabase
+          .from("customer")
+          .select("fullname, phone_number, address")
+          .eq("id", selectedSaleGroup.customer_id)
           .single();
-        if (error) {
-          console.error('Error creating receipt:', error);
-          toast.error('Failed to create receipt.');
-          return;
+        if (customerError) {
+          console.error('Error fetching customer:', customerError);
+          toast.error('Failed to fetch customer details.');
+        } else {
+          customer_name = customer.fullname || "";
+          phone_number = customer.phone_number || "";
+          customer_address = customer.address || "";
         }
-        receiptData = [newReceipt];
       }
 
-      if (receiptData.length > 1) {
-        const [latestReceipt] = receiptData;
-        await supabase
-          .from("receipts")
-          .delete()
-          .eq("sale_group_id", selectedSaleGroup.id)
-          .neq("id", latestReceipt.id);
-        receiptData = [latestReceipt];
+      const receiptInsert = {
+        store_receipt_id: selectedSaleGroup.store_id,
+        sale_group_id: selectedSaleGroup.id,
+        product_id: firstSale.dynamic_product.id,
+        sales_amount: totalAmount,
+        sales_qty: totalQuantity,
+        product_name: firstSale.dynamic_product.name,
+        device_id: firstSale.device_id || null,
+        customer_name,
+        customer_address,
+        phone_number,
+        warranty: "",
+        date: new Date(selectedSaleGroup.created_at).toISOString(),
+        receipt_id: `RCPT-${selectedSaleGroup.id}-${Date.now()}`
+      };
+
+      const { data: newReceipt, error } = await supabase
+        .from("receipts")
+        .insert([receiptInsert])
+        .select()
+        .single();
+      if (error) {
+        console.error('Error creating receipt:', error);
+        toast.error('Failed to create receipt.');
+        return;
       }
+      receiptData = [newReceipt];
+    }
 
-      setReceipts(receiptData || []);
-      setSelectedReceipt(receiptData[0] || null);
-    })();
-  }, [selectedSaleGroup]);
+    if (receiptData.length > 1) {
+      const [latestReceipt] = receiptData;
+      await supabase
+        .from("receipts")
+        .delete()
+        .eq("sale_group_id", selectedSaleGroup.id)
+        .neq("id", latestReceipt.id);
+      receiptData = [latestReceipt];
+    }
 
-  // Set selected receipt and sale group for single receipt view
-  useEffect(() => {
-    if (!singleReceipt) return;
-    setSelectedSaleGroup(singleReceipt.sale_groups);
-    setSelectedReceipt(singleReceipt);
-  }, [singleReceipt]);
+    setReceipts(receiptData || []);
+    setSelectedReceipt(receiptData[0] || null);
+  })();
+}, [selectedSaleGroup]);
+
+
 
   // Filter receipts based on search term
   useEffect(() => {
@@ -333,23 +368,57 @@ export default function ReceiptQRCode({ singleReceipt = null }) {
 
   const handleChange = e => setForm(f => ({ ...f, [e.target.name]: e.target.value }));
 
-  const saveReceipt = async () => {
-    try {
-      await supabase.from("receipts").update({ ...editing, ...form }).eq("id", editing.id);
-      setEditing(null);
-      setForm({ customer_name: "", customer_address: "", phone_number: "", warranty: "" });
-      const { data } = await supabase
-        .from("receipts")
-        .select("*")
-        .eq("sale_group_id", selectedSaleGroup.id)
-        .order('id', { ascending: false });
-      setReceipts(data);
-      toast.success('Receipt updated successfully!');
-    } catch (error) {
-      console.error('Error updating receipt:', error);
-      toast.error('Failed to update receipt.');
+ const saveReceipt = async () => {
+  try {
+    if (!selectedSaleGroup.customer_id) {
+      toast.error('No customer associated with this sale group.');
+      return;
     }
-  };
+
+    // Update customer table with fullname, phone_number, and address
+    const { error: customerError } = await supabase
+      .from("customer")
+      .update({
+        fullname: form.customer_name,
+        phone_number: form.phone_number,
+        address: form.customer_address
+      })
+      .eq("id", selectedSaleGroup.customer_id);
+    if (customerError) {
+      console.error('Error updating customer:', customerError);
+      throw new Error('Failed to update customer details.');
+    }
+
+    // Update receipts table with warranty and mirrored customer details
+    const { error: receiptError } = await supabase
+      .from("receipts")
+      .update({
+        customer_name: form.customer_name,
+        customer_address: form.customer_address,
+        phone_number: form.phone_number,
+        warranty: form.warranty
+      })
+      .eq("id", editing.id);
+    if (receiptError) {
+      console.error('Error updating receipt:', receiptError);
+      throw new Error('Failed to update receipt.');
+    }
+
+    // Refresh receipts
+    const { data } = await supabase
+      .from("receipts")
+      .select("*")
+      .eq("sale_group_id", selectedSaleGroup.id)
+      .order('id', { ascending: false });
+    setReceipts(data);
+    setEditing(null);
+    setForm({ customer_name: "", customer_address: "", phone_number: "", warranty: "" });
+    toast.success('Receipt updated successfully!');
+  } catch (error) {
+    console.error('Error updating receipt:', error);
+    toast.error(error.message);
+  }
+};
 
   const qrCodeUrl = selectedReceipt ? `${window.location.origin}/receipt/${selectedReceipt.receipt_id}` : '';
 

@@ -1,11 +1,14 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { FaEye, FaEyeSlash, FaStore, FaUsers, FaUserShield, FaUserCog } from 'react-icons/fa';
+import { FaEye, FaEyeSlash } from 'react-icons/fa';
 import { supabase } from '../../supabaseClient';
 import { motion } from 'framer-motion';
 import { ToastContainer, toast } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
+import { saveLoginOffline, tryLoginOffline} from '../../authDB';
+import dexieDB from '../../dexieDb';
 
+// Animation variants
 const sectionVariants = {
   hidden: { opacity: 0, y: 40 },
   visible: { opacity: 1, y: 0, transition: { duration: 0.6, staggerChildren: 0.2 } },
@@ -40,24 +43,25 @@ export default function Login() {
   const [errors, setErrors] = useState({});
   const navigate = useNavigate();
 
-const hashPwd = async (plain) => {
-  try {
-    if (window.crypto?.subtle) {
-      const buf = new TextEncoder().encode(plain);
-      const hash = await crypto.subtle.digest('SHA-256', buf);
-      return Array.from(new Uint8Array(hash))
-        .map((b) => b.toString(16).padStart(2, '0'))
-        .join('');
-    } else {
-      console.warn('⚠️ crypto.subtle not available. Using plaintext as fallback.');
-      return plain; // Fallback: use raw password (for dev only!)
+  const hashedPassword = async (plain) => {
+    try {
+      if (window.crypto?.subtle) {
+        const buf = new TextEncoder().encode(plain);
+        const hash = await crypto.subtle.digest('SHA-256', buf);
+        return Array.from(new Uint8Array(hash))
+          .map((b) => b.toString(16).padStart(2, '0'))
+          .join('');
+      } else {
+        console.warn('⚠️ crypto.subtle not available. Using plaintext as fallback.');
+        return plain; // Fallback: use raw password (for dev only!)
+      }
+    } catch (err) {
+      console.error('❌ Hashing failed:', err);
+      return plain; // Fallback to raw password in dev mode
     }
-  } catch (err) {
-    console.error('❌ Hashing failed:', err);
-    return plain; // fallback to raw password in dev mode
-  }
-};
- const validateForm = () => {
+  };
+
+  const validateForm = () => {
     const newErrors = {};
     if (!email) {
       newErrors.email = 'Email is required';
@@ -73,7 +77,7 @@ const hashPwd = async (plain) => {
 
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
-};
+  };
 
   const pickAccess = (opt, allAccess) => {
     const userAccess = {
@@ -89,23 +93,19 @@ const hashPwd = async (plain) => {
 
     const storeId = opt.storeId || allAccess.find((a) => a.storeId)?.storeId || '3';
     const ownerId = allAccess.find((a) => a.ownerId)?.ownerId || '1';
-    const userId = opt.userId || null; // Store store_users.id for team role
+    const userId = opt.userId || null;
     const adminId = opt.adminId || null;
-    const userEmail = opt.email || email; // Store email for querying
+    const userEmail = opt.email || email;
 
     localStorage.setItem('store_id', storeId);
     localStorage.setItem('owner_id', ownerId);
     if (userId) {
-      localStorage.setItem('user_id', userId); // Store store_users.id
-    }
-    localStorage.setItem('user_email', userEmail); // Store email
-
-
-
-     if (adminId) {
-      localStorage.setItem('admin_id', adminId); // Store store_users.id
+      localStorage.setItem('user_id', userId);
     }
     localStorage.setItem('user_email', userEmail);
+    if (adminId) {
+      localStorage.setItem('admin_id', adminId);
+    }
 
     console.log('Set localStorage:', {
       store_id: storeId,
@@ -147,60 +147,58 @@ const hashPwd = async (plain) => {
 
   const handleLogin = async (e) => {
     e.preventDefault();
-    if (!validateForm()) {
-      toast.error('Please fix the errors in the form.', {
-        position: 'top-right',
-        autoClose: 5000,
-        hideProgressBar: false,
-        closeOnClick: true,
-        pauseOnHover: true,
-        draggable: true,
-        theme: 'colored',
-      });
-      return;
+    if (!validateForm()) return;
+
+    // STEP 1: Try offline login if offline
+    if (!navigator.onLine) {
+      try {
+        const offlineUser = await tryLoginOffline(email, await hashedPassword(password));
+        if (offlineUser) {
+          localStorage.setItem('user_access', JSON.stringify(offlineUser.allowed_dashboard));
+          localStorage.setItem('user_email', offlineUser.email_address);
+          localStorage.setItem('store_id', offlineUser.store_id);
+          localStorage.setItem('owner_id', offlineUser.owner_id || offlineUser.store_id);
+          pickAccess(offlineUser.allowed_dashboard[0], offlineUser.allowed_dashboard);
+          toast.success('Logged in offline successfully!');
+          return;
+        } else {
+          setErrors({ general: 'Invalid credentials or no offline record found.' });
+          return;
+        }
+      } catch (err) {
+        console.error('Offline login error:', err);
+        setErrors({ general: 'Failed to log in offline.' });
+        return;
+      }
     }
 
+    // STEP 2: Online login via Supabase
     setLoading(true);
     try {
-      const hashed = await hashPwd(password);
+      const hashed = await hashedPassword(password);
 
-      const { data: owners = [], error: ownerErr } = await supabase
+      const { data: owners = [] } = await supabase
         .from('stores')
         .select('id, shop_name')
         .eq('email_address', email)
         .eq('password', hashed);
 
-      const { data: teamData = [], error: teamErr } = await supabase
+      const { data: teamData = [] } = await supabase
         .from('store_users')
         .select('id, role, store_id, email_address, stores(id, shop_name)')
         .eq('email_address', email)
         .eq('password', hashed);
 
-      const { data: adminData = [], error: adminErr } = await supabase
+      const { data: adminData = [] } = await supabase
         .from('admins')
         .select('id, role')
         .eq('email', email)
         .eq('password', hashed);
 
-      const { data: storeOwnersData = [], error: storeOwnerErr } = await supabase
+      const { data: storeOwnersData = [] } = await supabase
         .from('store_owners')
         .select('id, full_name')
         .eq('email', email);
-
-      if (ownerErr || teamErr || adminErr || storeOwnerErr) {
-        console.error(ownerErr, teamErr, adminErr, storeOwnerErr);
-        toast.error('An error occurred. Please try again.', {
-          position: 'top-right',
-          autoClose: 5000,
-          hideProgressBar: false,
-          closeOnClick: true,
-          pauseOnHover: true,
-          draggable: true,
-          theme: 'colored',
-        });
-        setLoading(false);
-        return;
-      }
 
       const opts = [];
 
@@ -210,22 +208,18 @@ const hashPwd = async (plain) => {
           label: `Single Store Dashboard: ${o.shop_name}`,
           storeId: o.id,
           role: 'owner',
-          screenclipExtensionId: 'jmjbgcjbgmcfgbgikmbdioggjlhjegpp',
-          icon: <FaStore />,
-          email: email, // Include email
+          email_address: email,
         });
       });
 
       teamData.forEach((u) => {
         opts.push({
           type: 'team',
-          label: `${u.role.charAt(0).toUpperCase() + u.role.slice(1)} @ ${u.stores.shop_name}`,
+          label: `${u.role} @ ${u.stores?.shop_name || 'Unknown Store'}`,
           storeId: u.store_id,
-          userId: u.id, // Include store_users.id
-          email: u.email_address, // Include email_address
+          userId: u.id,
+          email_address: u.email_address,
           role: u.role,
-          screenclipExtensionId: 'jmjbgcjbgmcfgbgikmbdioggjlhjegpp',
-          icon: <FaUsers />,
         });
       });
 
@@ -235,60 +229,89 @@ const hashPwd = async (plain) => {
           label: `Multi-Store Dashboard (${so.full_name})`,
           ownerId: so.id,
           role: 'store_owner',
-          screenclipExtensionId: 'jmjbgcjbgmcfgbgikmbdioggjlhjegpp',
-          icon: <FaUserShield />,
-          email: email, // Include email
+          email_address: email,
         });
       });
 
       adminData.forEach((a) => {
         opts.push({
           type: a.role === 'superadmin' ? 'superadmin' : 'admin',
-          label: `${a.role.charAt(0).toUpperCase() + a.role.slice(1)} Panel`,
+          label: `${a.role} Panel`,
           adminId: a.id,
           role: a.role,
-          screenclipExtensionId: 'jmjbgcjbgmcfgbgikmbdioggjlhjegpp',
-          icon: <FaUserCog />,
-          email: email, // Include email
+          email_address: email,
         });
       });
 
-      console.log('Access Options:', opts);
-
       if (opts.length === 0) {
-        toast.error('Invalid credentials or no access.', {
-          position: 'top-right',
-          autoClose: 5000,
-          hideProgressBar: false,
-          closeOnClick: true,
-          pauseOnHover: true,
-          draggable: true,
-          theme: 'colored',
-        });
-      } else if (opts.length === 1) {
-        pickAccess(opts[0], opts);
+        setErrors({ general: '❌ Invalid credentials or no matching user found.' });
+        return;
+      }
+
+      // STEP 3: Save to IndexedDB for future offline login
+      const first = opts[0];
+      const userToSave = {
+        email_address: email,
+        role: first.role || 'unknown',
+        store_id: first.storeId || null,
+        user_id: first.userId || null,
+        owner_id: first.ownerId || null,
+        admin_id: first.adminId || null,
+        allowed_dashboard: opts,
+        hashed_password: hashed,
+      };
+
+      await saveLoginOffline(userToSave);
+      console.log('✅ User saved offline:', userToSave);
+
+      // Save store metadata to dexieDB for offline dashboard access
+      const uniqueStoreIds = [...new Set(opts.map((o) => o.storeId).filter(Boolean))];
+
+      for (const storeId of uniqueStoreIds) {
+        const { data: storeMeta, error: storeErr } = await supabase
+          .from('stores')
+          .select('id, shop_name, allowed_dashboard')
+          .eq('id', storeId)
+          .single();
+
+        if (!storeErr && storeMeta) {
+          await dexieDB.table('stores').put(storeMeta);
+          console.log('✅ Saved store to IndexedDB:', storeMeta);
+        } else {
+          console.warn('⚠️ Could not fetch storeMeta for ID:', storeId, storeErr);
+        }
+      }
+
+      // STEP 4: Access handling
+      if (opts.length === 1) {
+        pickAccess(first, opts);
       } else {
         setAccessOptions(opts);
       }
-    } catch (e) {
-      console.error(e);
-      toast.error('Unexpected error. Please try again.', {
-        position: 'top-right',
-        autoClose: 5000,
-        hideProgressBar: false,
-        closeOnClick: true,
-        pauseOnHover: true,
-        draggable: true,
-        theme: 'colored',
-      });
+    } catch (err) {
+      console.error('Login error:', err);
+      setErrors({ general: '❌ An error occurred during login.' });
     } finally {
       setLoading(false);
     }
   };
 
+
+
+
+
+
+
+
+
+
+
+
+
   if (accessOptions) {
     return (
       <motion.section
+      
         className="py-20 md:py-24 px-6 bg-gradient-to-b from-indigo-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800 relative overflow-hidden"
         initial="hidden"
         animate="visible"
@@ -297,6 +320,7 @@ const hashPwd = async (plain) => {
         aria-labelledby="dashboard-selection-title"
       >
         {/* Wavy Top Border */}
+        
         <svg className="absolute top-0 w-full" viewBox="0 0 1440 100" preserveAspectRatio="none">
           <path
             d="M0,0 C280,100 720,0 1440,100 L1440,0 Z"
@@ -310,6 +334,7 @@ const hashPwd = async (plain) => {
             </linearGradient>
           </defs>
         </svg>
+       
 
         {/* Wavy Bottom Border */}
         <svg className="absolute bottom-0 w-full" viewBox="0 0 1440 100" preserveAspectRatio="none">
@@ -373,6 +398,8 @@ const hashPwd = async (plain) => {
       </motion.section>
     );
   }
+
+
 
   return (
     <motion.section

@@ -12,10 +12,7 @@ import { ToastContainer, toast } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 import { motion } from 'framer-motion';
 import { Html5Qrcode, Html5QrcodeSupportedFormats, Html5QrcodeScannerState } from 'html5-qrcode';
-import { useOfflineInsert } from '../../services/syncService'; // adjust path
-
-
-
+import CustomerSelector from '../DynamicSales/CustomerSelector';
 
 const tooltipVariants = {
   hidden: { opacity: 0, y: 10 },
@@ -58,6 +55,7 @@ export default function SalesTracker() {
   const [manualInput, setManualInput] = useState('');
   const [externalScannerMode, setExternalScannerMode] = useState(false);
   const [, setAvailableDeviceIds] = useState({});
+   const [selectedCustomerId, setSelectedCustomerId] = useState(null);
 
   // Refs
   const videoRef = useRef(null);
@@ -958,38 +956,55 @@ const totalPages = useMemo(() => {
     }
   }, [storeId]);
 
-  const fetchSales = useCallback(async () => {
-    if (!storeId) return;
-    const { data, error } = await supabase
-      .from('dynamic_sales')
-      .select(`
-        id,
-        sale_group_id,
-        dynamic_product_id,
-        quantity,
-        unit_price,
-        amount,
-        payment_method,
-        paid_to,
-        device_id,
-        sold_at,
-        dynamic_product(name)
-      `)
-      .eq('store_id', storeId)
-      .order('sold_at', { ascending: false });
-    if (error) {
-      toast.error(`Failed to fetch sales: ${error.message}`);
-      setSales([]);
-      setFiltered([]);
-    } else {
-      const processedSales = (data || []).map((sale) => ({
-        ...sale,
-        deviceIds: sale.device_id ? sale.device_id.split(',').filter((id) => id.trim()) : [],
-      }));
-      setSales(processedSales);
-      setFiltered(processedSales);
-    }
-  }, [storeId]);
+ 
+const fetchSales = useCallback(async () => {
+  if (!storeId) return;
+  const { data, error } = await supabase
+    .from('dynamic_sales')
+    .select(`
+      id,
+      sale_group_id,
+      dynamic_product_id,
+      quantity,
+      unit_price,
+      amount,
+      payment_method,
+      paid_to,
+      device_id,
+      sold_at,
+      customer_id,
+      dynamic_product(name),
+      customer:customer_id(fullname)
+    `)
+    .eq('store_id', storeId)
+    .order('sold_at', { ascending: false });
+  if (error) {
+    toast.error(`Failed to fetch sales: ${error.message}`);
+    setSales([]);
+    setFiltered([]);
+  } else {
+    const processedSales = (data || []).map((sale) => ({
+      ...sale,
+      deviceIds: sale.device_id ? sale.device_id.split(',').filter((id) => id.trim()) : [],
+      customer_name: sale.customer?.fullname || 'Unknown',
+    }));
+    setSales(processedSales);
+    setFiltered(processedSales);
+  }
+}, [storeId]);
+
+
+
+
+
+
+
+
+
+  useEffect(() => {
+    fetchSales();
+  }, [fetchSales]);
+
 
   useEffect(() => {
     fetchProducts();
@@ -997,20 +1012,29 @@ const totalPages = useMemo(() => {
     fetchSales();
   }, [fetchProducts, fetchInventory, fetchSales]);
 
+
+
   // Search Filter
-  useEffect(() => {
-    if (!search) return setFiltered(sales);
-    const q = search.toLowerCase();
-    setFiltered(
-      sales.filter(
-        (s) =>
-          s.dynamic_product.name.toLowerCase().includes(q) ||
-          s.payment_method.toLowerCase().includes(q) ||
-          s.deviceIds.some((id) => id.toLowerCase().includes(q))
-      )
-    );
+useEffect(() => {
+  if (!search) {
+    setFiltered(sales);
     setCurrentPage(1);
-  }, [search, sales]);
+    return;
+  }
+  const q = search.toLowerCase();
+  setFiltered(
+    sales.filter(
+      (s) =>
+        s.dynamic_product.name.toLowerCase().includes(q) ||
+        s.payment_method.toLowerCase().includes(q) ||
+        s.deviceIds.some((id) => id.toLowerCase().includes(q)) ||
+        (s.customer_name || '').toLowerCase().includes(q)
+    )
+  );
+  setCurrentPage(1);
+}, [search, sales]);
+
+
 
   // Reset Pagination on View Mode Change
   useEffect(() => {
@@ -1161,88 +1185,105 @@ const totalPages = useMemo(() => {
       };
     });
   };
-
-  // CRUD Operations
- 
 const createSale = async (e) => {
   e.preventDefault();
   try {
-    if (!paymentMethod) {
-      toast.error('Please select a payment method.');
-      return;
-    }
+    const totalAmount = lines.reduce((sum, l) => sum + (l.quantity * l.unit_price || 0), 0);
+    if (totalAmount <= 0) throw new Error('Total amount must be greater than zero');
 
-    for (const line of lines) {
-      if (!line.dynamic_product_id || line.quantity <= 0 || line.unit_price <= 0) {
-        toast.error('Please fill in all required fields for each sale line.');
-        return;
-      }
-      const inv = inventory.find((i) => i.dynamic_product_id === line.dynamic_product_id);
-      if (!inv || inv.available_qty < line.quantity) {
-        const prod = products.find((p) => p.id === line.dynamic_product_id);
-        toast.error(`Insufficient stock for ${prod.name}: only ${inv?.available_qty || 0} available`);
-        return;
-      }
-
-      const deviceIds = line.deviceIds.filter((id) => id.trim());
-      if (deviceIds.length > 0) {
-        const uniqueIds = new Set(deviceIds);
-        if (uniqueIds.size < deviceIds.length) {
-          toast.error('Duplicate Product IDs detected in this sale line');
-          return;
-        }
+    if (selectedCustomerId) {
+      const { data: error } = await supabase
+        .from('customer')
+        .select('fullname')
+        .eq('id', selectedCustomerId)
+        .single();
+      if (error) {
+        toast.error(`Failed to fetch customer name: ${error.message}`);
+      } else {
       }
     }
 
-    // Create sale group (online only for now)
     const { data: grp, error: grpErr } = await supabase
       .from('sale_groups')
-      .insert([{ store_id: storeId, total_amount: totalAmount, payment_method: paymentMethod }])
+      .insert([{ 
+        store_id: storeId, 
+        total_amount: totalAmount, 
+        payment_method: paymentMethod, 
+        customer_id: selectedCustomerId 
+      }])
       .select('id')
       .single();
-
     if (grpErr) throw new Error(`Sale group creation failed: ${grpErr.message}`);
     const groupId = grp.id;
 
-    // Insert individual sales
-    for (const line of lines) {
-      const saleEntry = {
-        store_id: storeId,
-        sale_group_id: groupId,
-        dynamic_product_id: line.dynamic_product_id,
-        quantity: line.quantity,
-        unit_price: line.unit_price,
-        amount: line.quantity * line.unit_price,
-        device_id: line.deviceIds.filter((id) => id.trim()).join(',') || null,
-        payment_method: paymentMethod,
-      };
-      await useOfflineInsert('dynamic_sales', saleEntry); // 👈 Offline-safe insert
-    }
-
-    // Update inventory
-    for (const line of lines) {
-      const inv = inventory.find((i) => i.dynamic_product_id === line.dynamic_product_id);
-      if (inv) {
-        const newQty = inv.available_qty - line.quantity;
-        const { error } = await supabase
-          .from('dynamic_inventory')
-          .update({ available_qty: newQty })
-          .eq('dynamic_product_id', line.dynamic_product_id)
-          .eq('store_id', storeId);
-        if (error) toast.error(`Inventory update failed for product ${line.dynamic_product_id}`);
-        setInventory((prev) =>
-          prev.map((i) =>
-            i.dynamic_product_id === line.dynamic_product_id ? { ...i, available_qty: newQty } : i
-          )
-        );
-      }
-    }
+    const inserts = lines.map((l) => ({
+      store_id: storeId,
+      sale_group_id: groupId,
+      dynamic_product_id: l.dynamic_product_id,
+      quantity: l.quantity,
+      unit_price: l.unit_price,
+      amount: l.quantity * l.unit_price,
+      device_id: l.deviceIds.filter((id) => id.trim()).join(',') || null,
+      payment_method: paymentMethod,
+      customer_id: selectedCustomerId,
+    }));
+    const { error: insErr } = await supabase.from('dynamic_sales').insert(inserts);
+    if (insErr) throw new Error(`Sales insertion failed: ${insErr.message}`);
 
     toast.success('Sale added successfully!');
-    stopScanner();
     setShowAdd(false);
     setLines([{ dynamic_product_id: '', quantity: 1, unit_price: '', deviceIds: [''], isQuantityManual: false }]);
     setPaymentMethod('Cash');
+    setSelectedCustomerId(null);
+    fetchSales();
+  } catch (err) {
+    toast.error(err.message);
+  }
+};
+
+const saveEdit = async () => {
+  try {
+    const originalSale = sales.find((s) => s.id === editing);
+    if (!originalSale) throw new Error('Sale not found');
+
+    let customer_name = 'Unknown';
+    if (saleForm.customer_id) {
+      const { data: customer, error } = await supabase
+        .from('customer')
+        .select('fullname')
+        .eq('id', saleForm.customer_id)
+        .single();
+      if (error) {
+        toast.error(`Failed to fetch customer name: ${error.message}`);
+      } else {
+        customer_name = customer.fullname || 'Unknown';
+      }
+    }
+
+    const { error } = await supabase
+      .from('dynamic_sales')
+      .update({
+        dynamic_product_id: saleForm.dynamic_product_id || originalSale.dynamic_product_id,
+        quantity: saleForm.quantity,
+        unit_price: saleForm.unit_price,
+        device_id: saleForm.deviceIds.filter((id) => id.trim()).join(',') || null,
+        payment_method: saleForm.payment_method || originalSale.payment_method,
+        customer_id: saleForm.customer_id,
+        customer_name,
+      })
+      .eq('id', editing);
+    if (error) throw new Error(`Update failed: ${error.message}`);
+
+    await supabase
+      .from('sale_groups')
+      .update({
+        customer_id: saleForm.customer_id,
+        customer_name,
+      })
+      .eq('id', originalSale.sale_group_id);
+
+    toast.success('Sale updated successfully!');
+    setEditing(null);
     fetchSales();
   } catch (err) {
     toast.error(err.message);
@@ -1250,69 +1291,7 @@ const createSale = async (e) => {
 };
 
 
-  const saveEdit = async () => {
-    try {
-      const originalSale = sales.find((s) => s.id === editing);
-      if (!originalSale) throw new Error('Sale not found');
 
-      const quantityDiff = saleForm.quantity - originalSale.quantity;
-      if (quantityDiff > 0) {
-        const inv = inventory.find((i) => i.dynamic_product_id === saleForm.dynamic_product_id || originalSale.dynamic_product_id);
-        if (!inv || inv.available_qty < quantityDiff) {
-          throw new Error(
-            `Insufficient stock to increase quantity by ${quantityDiff}. Available: ${inv?.available_qty || 0}`
-          );
-        }
-      }
-
-      const deviceIds = saleForm.deviceIds.filter((id) => id.trim());
-      if (deviceIds.length > 0) {
-        const uniqueIds = new Set(deviceIds);
-        if (uniqueIds.size < deviceIds.length) {
-          toast.error('Duplicate Product IDs detected in this sale');
-          return;
-        }
-      }
-
-      const { error } = await supabase
-        .from('dynamic_sales')
-        .update({
-          dynamic_product_id: saleForm.dynamic_product_id || originalSale.dynamic_product_id,
-          quantity: saleForm.quantity,
-          unit_price: saleForm.unit_price,
-          device_id: deviceIds.join(',') || null,
-          payment_method: saleForm.payment_method || originalSale.payment_method,
-        })
-        .eq('id', editing);
-      if (error) throw new Error(`Update failed: ${error.message}`);
-
-      if (quantityDiff !== 0) {
-        const inv = inventory.find((i) => i.dynamic_product_id === saleForm.dynamic_product_id || originalSale.dynamic_product_id);
-        if (inv) {
-          const newQty = inv.available_qty - quantityDiff;
-          await supabase
-            .from('dynamic_inventory')
-            .update({ available_qty: newQty })
-            .eq('dynamic_product_id', saleForm.dynamic_product_id || originalSale.dynamic_product_id)
-            .eq('store_id', storeId);
-          setInventory((prev) =>
-            prev.map((i) =>
-              i.dynamic_product_id === (saleForm.dynamic_product_id || originalSale.dynamic_product_id)
-              ? { ...i, available_qty: newQty }
-              : i
-            )
-          );
-        }
-      }
-
-      toast.success('Sale updated successfully!');
-      stopScanner();
-      setEditing(null);
-      fetchSales();
-    } catch (err) {
-      toast.error(err.message);
-    }
-  };
 
   const deleteSale = async (s) => {
     if (!window.confirm(`Delete sale #${s.id}`)) return;
@@ -1645,6 +1624,12 @@ const createSale = async (e) => {
             <option>Wallet</option>
           </select>
         </label>
+
+         <CustomerSelector
+                storeId={storeId}
+                selectedCustomerId={selectedCustomerId}
+                onCustomerChange={setSelectedCustomerId}
+              />
       </div>
       <div className="mt-4 text-lg sm:text-xl font-bold text-gray-900 dark:text-gray-200">
         Total: ₦{formatCurrency(totalAmount)}
@@ -1743,7 +1728,13 @@ const createSale = async (e) => {
                       ))}
                     </>
                   )}
+                   <CustomerSelector
+                storeId={storeId}
+                selectedCustomerId={saleForm.customer_id}
+                onCustomerChange={(id) => setSaleForm({ ...saleForm, customer_id: id })}
+              />
                 </select>
+                
               ) : field.type === 'deviceIds' ? (
                 <div className="space-y-2">
                   {saleForm.deviceIds.map((id, deviceIdx) => (
@@ -1968,7 +1959,7 @@ const createSale = async (e) => {
         <table className="min-w-full bg-white dark:bg-gray-900 divide-y divide-gray-200">
           <thead className="bg-gray-100 dark:bg-gray-800">
             <tr>
-              {['Product', 'Quantity', 'Unit Price', 'Amount', 'Payment', 'Date Sold', 'Actions'].map((h) => (
+              {['Product', 'Customer', 'Quantity', 'Unit Price', 'Amount', 'Payment', 'Date Sold', 'Actions'].map((h) => (
                 <th
                   key={h}
                   className="px-4 py-2 text-left text-sm font-semibold text-gray-700 dark:text-gray-200"
@@ -1982,6 +1973,7 @@ const createSale = async (e) => {
             {paginatedSales.map((s, index) => (
               <tr key={s.id}>
                 <td className="px-4 py-2 text-sm">{s.dynamic_product.name}</td>
+                 <td className="px-4 py-2 text-sm">{s.customer_name}</td>
                 <td className="px-4 py-2 text-sm">{s.quantity}</td>
                 <td className="px-4 py-2 text-sm">{s.unit_price.toFixed(2)}</td>
                 <td className="px-4 py-2 text-sm">{s.amount.toFixed(2)}</td>
@@ -1999,6 +1991,7 @@ const createSale = async (e) => {
                         isQuantityManual: false,
                         isPriceManual: true,
                         dynamic_product_id: s.dynamic_product_id,
+                         customer_id: s.customer_id,
                       });
                     }}
                     className={`p-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 edit-button-${index}`}

@@ -82,88 +82,94 @@ export default function ReceiptManager() {
 
   // Load sale groups with associated dynamic sales and dynamic_product
   useEffect(() => {
-    if (!storeId) return;
-    supabase
-      .from('sale_groups')
-      .select(`
+  if (!storeId) return;
+  supabase
+    .from('sale_groups')
+    .select(`
+      id,
+      store_id,
+      total_amount,
+      payment_method,
+      created_at,
+      customer_id,
+      dynamic_sales (
         id,
-        store_id,
-        total_amount,
-        payment_method,
-        created_at,
-        dynamic_sales (
+        device_id,
+        quantity,
+        amount,
+        sale_group_id,
+        dynamic_product (
           id,
-          device_id,
-          quantity,
-          amount,
-          sale_group_id,
-          dynamic_product (
-            id,
-            name
-          )
+          name
         )
-      `)
-      .eq('store_id', storeId)
-      .order('created_at', { ascending: false })
-      .then(({ data }) => setSaleGroupsList(data || []));
-  }, [storeId]);
+      ),
+      customer:customer_id (fullname, address, phone_number)
+    `)
+    .eq('store_id', storeId)
+    .order('created_at', { ascending: false })
+    .then(({ data }) => setSaleGroupsList(data || []));
+}, [storeId]);
+
+
 
   // Load or initialize a single receipt for a sale group
-  useEffect(() => {
-    if (!selectedSaleGroup) {
-      setReceipts([]);
-      return;
-    }
-    (async () => {
-      // Fetch existing receipts
-      let { data: receiptData } = await supabase
+ useEffect(() => {
+  if (!selectedSaleGroup) {
+    setReceipts([]);
+    return;
+  }
+  (async () => {
+    // Fetch existing receipts
+    let { data: receiptData } = await supabase
+      .from("receipts")
+      .select("*")
+      .eq("sale_group_id", selectedSaleGroup.id)
+      .order('id', { ascending: false });
+
+    // If no receipt exists, create one for the sale group
+    if (receiptData.length === 0 && selectedSaleGroup.dynamic_sales?.length > 0) {
+      const firstSale = selectedSaleGroup.dynamic_sales[0];
+      const totalQuantity = selectedSaleGroup.dynamic_sales.reduce((sum, sale) => sum + sale.quantity, 0);
+      const receiptInsert = {
+        store_receipt_id: selectedSaleGroup.store_id,
+        sale_group_id: selectedSaleGroup.id,
+        product_id: firstSale.dynamic_product.id,
+        sales_amount: selectedSaleGroup.total_amount,
+        sales_qty: totalQuantity,
+        product_name: firstSale.dynamic_product.name,
+        device_id: firstSale.device_id || null,
+        customer_name: selectedSaleGroup.customer?.fullname || "",
+        customer_address: selectedSaleGroup.customer?.address || "",
+        phone_number: selectedSaleGroup.customer?.phone_number || "",
+        warranty: "",
+        date: new Date(selectedSaleGroup.created_at).toISOString(),
+        receipt_id: `RCPT-${selectedSaleGroup.id}-${Date.now()}`
+      };
+
+      const { data: newReceipt } = await supabase
         .from("receipts")
-        .select("*")
+        .insert([receiptInsert])
+        .select()
+        .single();
+      receiptData = [newReceipt];
+    }
+
+    // Ensure only one receipt is kept
+    if (receiptData.length > 1) {
+      const [latestReceipt] = receiptData;
+      await supabase
+        .from("receipts")
+        .delete()
         .eq("sale_group_id", selectedSaleGroup.id)
-        .order('id', { ascending: false });
+        .neq("id", latestReceipt.id);
+      receiptData = [latestReceipt];
+    }
 
-      // If no receipt exists, create one for the sale group
-      if (receiptData.length === 0 && selectedSaleGroup.dynamic_sales?.length > 0) {
-        const firstSale = selectedSaleGroup.dynamic_sales[0];
-        const totalQuantity = selectedSaleGroup.dynamic_sales.reduce((sum, sale) => sum + sale.quantity, 0);
-        const receiptInsert = {
-          store_receipt_id: selectedSaleGroup.store_id,
-          sale_group_id: selectedSaleGroup.id,
-          product_id: firstSale.dynamic_product.id,
-          sales_amount: selectedSaleGroup.total_amount,
-          sales_qty: totalQuantity,
-          product_name: firstSale.dynamic_product.name,
-          device_id: firstSale.device_id || null,
-          customer_name: "",
-          customer_address: "",
-          phone_number: "",
-          warranty: "",
-          date: new Date(selectedSaleGroup.created_at).toISOString(),
-          receipt_id: `RCPT-${selectedSaleGroup.id}-${Date.now()}`
-        };
+    setReceipts(receiptData || []);
+  })();
+}, [selectedSaleGroup]);
 
-        const { data: newReceipt } = await supabase
-          .from("receipts")
-          .insert([receiptInsert])
-          .select()
-          .single();
-        receiptData = [newReceipt];
-      }
 
-      // Ensure only one receipt is kept
-      if (receiptData.length > 1) {
-        const [latestReceipt] = receiptData;
-        await supabase
-          .from("receipts")
-          .delete()
-          .eq("sale_group_id", selectedSaleGroup.id)
-          .neq("id", latestReceipt.id);
-        receiptData = [latestReceipt];
-      }
-
-      setReceipts(receiptData || []);
-    })();
-  }, [selectedSaleGroup]);
 
   // Filter receipts on searchTerm or receipts change
   useEffect(() => {
@@ -240,22 +246,36 @@ export default function ReceiptManager() {
       warranty: r.warranty || ""
     });
   };
-  const saveReceipt = async () => {
-    await supabase.from("receipts").update({ ...editing, ...form }).eq("id", editing.id);
-    setEditing(null);
-    setForm({ customer_name: "", customer_address: "", phone_number: "", warranty: "" });
-    const { data } = await supabase
-      .from("receipts")
-      .select("*")
-      .eq("sale_group_id", selectedSaleGroup.id)
-      .order('id', { ascending: false });
-    setReceipts(data);
-  };
+
+
+ const saveReceipt = async () => {
+  await supabase
+    .from("receipts")
+    .update({
+      ...editing,
+      customer_name: form.customer_name,
+      customer_address: form.customer_address,
+      phone_number: form.phone_number,
+      warranty: form.warranty
+    })
+    .eq("id", editing.id);
+  setEditing(null);
+  setForm({ customer_name: "", customer_address: "", phone_number: "", warranty: "" });
+  const { data } = await supabase
+    .from("receipts")
+    .select("*")
+    .eq("sale_group_id", selectedSaleGroup.id)
+    .order('id', { ascending: false });
+  setReceipts(data);
+};
+
   const handlePrint = r => {
     openEdit(r);
     setTimeout(() => window.print(), 200);
   };
 
+
+  
   // Define filteredSaleGroups before pagination logic
   const filteredSaleGroups = [...saleGroupsList]
     .filter(sg =>

@@ -10,6 +10,7 @@ import {
 import { supabase } from '../../supabaseClient';
 import { ToastContainer, toast } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
+import CustomerSelector from '../DynamicSales/CustomerSelector';
 
 import { motion } from 'framer-motion';
 import { Html5Qrcode, Html5QrcodeSupportedFormats, Html5QrcodeScannerState } from 'html5-qrcode';
@@ -71,6 +72,8 @@ const playSuccessSound = () => {
   const [externalScannerMode, setExternalScannerMode] = useState(false);
   const lastScanTimeRef = useRef(0);
 const lastScannedCodeRef = useRef(null);
+const [selectedCustomerId, setSelectedCustomerId] = useState(null);
+
  
 
   // Refs
@@ -938,40 +941,44 @@ const handleManualInput = async () => {
     }
   }, [storeId]);
 
-  const fetchSales = useCallback(async () => {
-    if (!storeId) return;
-    const { data, error } = await supabase
-      .from('dynamic_sales')
-      .select(`
-        id,
-        sale_group_id,
-        dynamic_product_id,
-        quantity,
-        unit_price,
-        amount,
-        payment_method,
-        paid_to,
-        device_id,
-        device_size,
-        sold_at,
-        dynamic_product(name)
-      `)
-      .eq('store_id', storeId)
-      .order('sold_at', { ascending: false });
-    if (error) {
-      toast.error(`Failed to fetch sales: ${error.message}`);
-      setSales([]);
-      setFiltered([]);
-    } else {
-      const processedSales = (data || []).map(sale => ({
-        ...sale,
-        deviceIds: sale.device_id ? sale.device_id.split(',').filter(id => id.trim()) : [],
-        deviceSizes: sale.device_size ? sale.device_size.split(',').filter(size => size.trim()) : [],
-      }));
-      setSales(processedSales);
-      setFiltered(processedSales);
-    }
-  }, [storeId]);
+const fetchSales = useCallback(async () => {
+  if (!storeId) return;
+  const { data, error } = await supabase
+    .from('dynamic_sales')
+    .select(`
+      id,
+      sale_group_id,
+      dynamic_product_id,
+      quantity,
+      unit_price,
+      amount,
+      payment_method,
+      paid_to,
+      device_id,
+      device_size,
+      sold_at,
+      customer_id,
+      dynamic_product(name),
+      customer(fullname)
+    `)
+    .eq('store_id', storeId)
+    .order('sold_at', { ascending: false });
+  if (error) {
+    toast.error(`Failed to fetch sales: ${error.message}`);
+    setSales([]);
+    setFiltered([]);
+  } else {
+    const processedSales = (data || []).map(sale => ({
+      ...sale,
+      deviceIds: sale.device_id ? sale.device_id.split(',').filter(id => id.trim()) : [],
+      deviceSizes: sale.device_size ? sale.device_size.split(',').filter(size => size.trim()) : [],
+      customer_name: sale.customer?.fullname || 'Unknown', // Add customer_name
+    }));
+    setSales(processedSales);
+    setFiltered(processedSales);
+  }
+}, [storeId]);
+
 
   useEffect(() => {
     fetchProducts();
@@ -980,20 +987,21 @@ const handleManualInput = async () => {
   }, [fetchProducts, fetchInventory, fetchSales]);
 
   // Search Filter
-  useEffect(() => {
-    if (!search) return setFiltered(sales);
-    const q = search.toLowerCase();
-    setFiltered(
-      sales.filter(
-        (s) =>
-          s.dynamic_product.name.toLowerCase().includes(q) ||
-          s.payment_method.toLowerCase().includes(q) ||
-          s.deviceIds.some(id => id.toLowerCase().includes(q)) ||
-          s.deviceSizes.some(size => size.toLowerCase().includes(q))
-      )
-    );
-    setCurrentPage(1);
-  }, [search, sales]);
+   useEffect(() => {
+  if (!search) return setFiltered(sales);
+  const q = search.toLowerCase();
+  setFiltered(
+    sales.filter(
+      (s) =>
+        s.dynamic_product.name.toLowerCase().includes(q) ||
+        s.payment_method.toLowerCase().includes(q) ||
+        s.deviceIds.some(id => id.toLowerCase().includes(q)) ||
+        s.deviceSizes.some(size => size.toLowerCase().includes(q)) ||
+        (s.customer_name || '').toLowerCase().includes(q)
+    )
+  );
+  setCurrentPage(1);
+}, [search, sales]);
 
   // Reset Pagination on View Mode Change
   useEffect(() => {
@@ -1241,7 +1249,7 @@ const handleLineChange = async (lineIdx, field, value, deviceIdx = null, isBlur 
 
   const removeLine = (idx) => setLines((ls) => ls.filter((_, i) => i !== idx));
 
- const handleEditChange = (field, value, deviceIdx = null) => {
+const handleEditChange = (field, value, deviceIdx = null) => {
   setSaleForm((f) => {
     const next = { ...f };
     if (field === 'deviceIds' && deviceIdx !== null) {
@@ -1275,12 +1283,15 @@ const handleLineChange = async (lineIdx, field, value, deviceIdx = null, isBlur 
         next.deviceSizes = [''];
         next.quantity = next.isQuantityManual ? next.quantity : 1;
       }
+    } else if (field === 'customer_id') {
+      next.customer_id = Number(value) || null;
     } else {
       next[field] = ['unit_price'].includes(field) ? +value : value;
     }
     return next;
   });
 };
+
 
   const addEditDeviceId = (e) => {
     e.preventDefault();
@@ -1327,86 +1338,88 @@ const handleLineChange = async (lineIdx, field, value, deviceIdx = null, isBlur 
   };
 
   // CRUD Operations
-  const createSale = async (e) => {
-    e.preventDefault();
-    try {
-      if (!paymentMethod) {
-        toast.error('Please select a payment method.');
+ const createSale = async (e) => {
+  e.preventDefault();
+  try {
+    if (!paymentMethod) {
+      toast.error('Please select a payment method.');
+      return;
+    }
+    for (const line of lines) {
+      if (!line.dynamic_product_id || line.quantity <= 0 || line.unit_price <= 0) {
+        toast.error('Please fill in all required fields for each sale line.');
         return;
       }
-      for (const line of lines) {
-        if (!line.dynamic_product_id || line.quantity <= 0 || line.unit_price <= 0) {
-          toast.error('Please fill in all required fields for each sale line.');
+      const inv = inventory.find((i) => i.dynamic_product_id === line.dynamic_product_id);
+      if (!inv || inv.available_qty < line.quantity) {
+        const prod = products.find((p) => p.id === line.dynamic_product_id);
+        toast.error(`Insufficient stock for ${prod.name}: only ${inv?.available_qty || 0} available`);
+        return;
+      }
+      const deviceIds = line.deviceIds.filter(id => id.trim());
+      if (deviceIds.length > 0) {
+        const uniqueIds = new Set(deviceIds);
+        if (uniqueIds.size < deviceIds.length) {
+          toast.error('Duplicate Product IDs detected in this sale line');
           return;
         }
-        const inv = inventory.find((i) => i.dynamic_product_id === line.dynamic_product_id);
-        if (!inv || inv.available_qty < line.quantity) {
-          const prod = products.find((p) => p.id === line.dynamic_product_id);
-          toast.error(`Insufficient stock for ${prod.name}: only ${inv?.available_qty || 0} available`);
-          return;
-        }
-        const deviceIds = line.deviceIds.filter(id => id.trim());
-        if (deviceIds.length > 0) {
-          const uniqueIds = new Set(deviceIds);
-          if (uniqueIds.size < deviceIds.length) {
-            toast.error('Duplicate Product IDs detected in this sale line');
-            return;
-          }
-        }
       }
-
-      const { data: grp, error: grpErr } = await supabase
-        .from('sale_groups')
-        .insert([{ store_id: storeId, total_amount: totalAmount, payment_method: paymentMethod }])
-        .select('id')
-        .single();
-      if (grpErr) throw new Error(`Sale group creation failed: ${grpErr.message}`);
-      const groupId = grp.id;
-
-      const inserts = lines.map((l) => ({
-        store_id: storeId,
-        sale_group_id: groupId,
-        dynamic_product_id: l.dynamic_product_id,
-        quantity: l.quantity,
-        unit_price: l.unit_price,
-        amount: l.quantity * l.unit_price,
-        device_id: l.deviceIds.filter(id => id.trim()).join(',') || null,
-        device_size: l.deviceSizes.map(size => size.trim() || '').join(',') || null,
-        payment_method: paymentMethod,
-      }));
-      const { error: insErr } = await supabase.from('dynamic_sales').insert(inserts);
-      if (insErr) throw new Error(`Sales insertion failed: ${insErr.message}`);
-
-      for (const line of lines) {
-        const inv = inventory.find((i) => i.dynamic_product_id === line.dynamic_product_id);
-        if (inv) {
-          const newQty = inv.available_qty - line.quantity;
-          const { error } = await supabase
-            .from('dynamic_inventory')
-            .update({ available_qty: newQty })
-            .eq('dynamic_product_id', line.dynamic_product_id)
-            .eq('store_id', storeId);
-          if (error) toast.error(`Inventory update failed for product ${line.dynamic_product_id}`);
-          setInventory((prev) =>
-            prev.map((i) =>
-              i.dynamic_product_id === line.dynamic_product_id ? { ...i, available_qty: newQty } : i
-            )
-          );
-        }
-      }
-
-      toast.success('Sale added successfully!');
-      stopScanner();
-      setShowAdd(false);
-      setLines([{ dynamic_product_id: '', quantity: 1, unit_price: '', deviceIds: [''], deviceSizes: [''], isQuantityManual: false }]);
-      setPaymentMethod('Cash');
-      fetchSales();
-    } catch (err) {
-      toast.error(err.message);
     }
-  };
 
-  const saveEdit = async () => {
+    const { data: grp, error: grpErr } = await supabase
+      .from('sale_groups')
+      .insert([{ store_id: storeId, total_amount: totalAmount, payment_method: paymentMethod, customer_id: selectedCustomerId }])
+      .select('id')
+      .single();
+    if (grpErr) throw new Error(`Sale group creation failed: ${grpErr.message}`);
+    const groupId = grp.id;
+
+    const inserts = lines.map((l) => ({
+      store_id: storeId,
+      sale_group_id: groupId,
+      dynamic_product_id: l.dynamic_product_id,
+      quantity: l.quantity,
+      unit_price: l.unit_price,
+      amount: l.quantity * l.unit_price,
+      device_id: l.deviceIds.filter(id => id.trim()).join(',') || null,
+      device_size: l.deviceSizes.map(size => size.trim() || '').join(',') || null,
+      payment_method: paymentMethod,
+      customer_id: selectedCustomerId, // Add customer_id to dynamic_sales
+    }));
+    const { error: insErr } = await supabase.from('dynamic_sales').insert(inserts);
+    if (insErr) throw new Error(`Sales insertion failed: ${insErr.message}`);
+
+    for (const line of lines) {
+      const inv = inventory.find((i) => i.dynamic_product_id === line.dynamic_product_id);
+      if (inv) {
+        const newQty = inv.available_qty - line.quantity;
+        const { error } = await supabase
+          .from('dynamic_inventory')
+          .update({ available_qty: newQty })
+          .eq('dynamic_product_id', line.dynamic_product_id)
+          .eq('store_id', storeId);
+        if (error) toast.error(`Inventory update failed for product ${line.dynamic_product_id}`);
+        setInventory((prev) =>
+          prev.map((i) =>
+            i.dynamic_product_id === line.dynamic_product_id ? { ...i, available_qty: newQty } : i
+          )
+        );
+      }
+    }
+
+    toast.success('Sale added successfully!');
+    stopScanner();
+    setShowAdd(false);
+    setLines([{ dynamic_product_id: '', quantity: 1, unit_price: '', deviceIds: [''], deviceSizes: [''], isQuantityManual: false }]);
+    setPaymentMethod('Cash');
+    setSelectedCustomerId(null); // Reset customer selection
+    fetchSales();
+  } catch (err) {
+    toast.error(err.message);
+  }
+};
+ 
+const saveEdit = async () => {
   try {
     const originalSale = sales.find((s) => s.id === editing);
     if (!originalSale) throw new Error('Sale not found');
@@ -1439,6 +1452,7 @@ const handleLineChange = async (lineIdx, field, value, deviceIdx = null, isBlur 
         device_id: deviceIds.join(',') || null,
         device_size: saleForm.deviceSizes.map(size => size.trim() || '').join(',') || null,
         payment_method: saleForm.payment_method || originalSale.payment_method,
+        customer_id: saleForm.customer_id, // Add customer_id
       })
       .eq('id', editing);
     if (error) throw new Error(`Update failed: ${error.message}`);
@@ -1462,15 +1476,25 @@ const handleLineChange = async (lineIdx, field, value, deviceIdx = null, isBlur 
       }
     }
 
+    // Update sale_groups customer_id if necessary
+    if (saleForm.customer_id !== originalSale.customer_id) {
+      const { error: groupError } = await supabase
+        .from('sale_groups')
+        .update({ customer_id: saleForm.customer_id })
+        .eq('id', originalSale.sale_group_id)
+        .eq('store_id', storeId);
+      if (groupError) throw new Error(`Sale group update failed: ${groupError.message}`);
+    }
+
     toast.success('Sale updated successfully!');
     stopScanner();
     setEditing(null);
+    setSelectedCustomerId(null); // Reset customer selection
     fetchSales();
   } catch (err) {
     toast.error(err.message);
   }
 };
-
 
   const deleteSale = async (s) => {
     if (!window.confirm(`Delete sale #${s.id}?`)) return;
@@ -1636,7 +1660,6 @@ const handleLineChange = async (lineIdx, field, value, deviceIdx = null, isBlur 
 
       </div>
 
-   {/* Add Sale Modal */}
   {/* Add Sale Modal */}
 {showAdd && (
   <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center sm:items-start justify-center p-4 z-50 overflow-auto mt-0 sm:mt-16">
@@ -1802,6 +1825,12 @@ const handleLineChange = async (lineIdx, field, value, deviceIdx = null, isBlur 
                 <option>Wallet</option>
               </select>
             </label>
+             <CustomerSelector
+    storeId={storeId}
+    selectedCustomerId={selectedCustomerId}
+    onCustomerChange={setSelectedCustomerId}
+  />
+
           </div>
         </div>
       ))}
@@ -1876,7 +1905,8 @@ const handleLineChange = async (lineIdx, field, value, deviceIdx = null, isBlur 
         e.preventDefault();
         saveEdit();
       }}
-      className="bg-white dark:bg-gray-900 p-6 rounded-lg shadow-lg w-full max-w-3xl max-h-[85vh] overflow-y-auto space-y-4"    >
+      className="bg-white dark:bg-gray-900 p-6 rounded-lg shadow-lg w-full max-w-3xl max-h-[85vh] overflow-y-auto space-y-4"
+    >
       <h2 className="text-lg sm:text-xl font-bold text-center text-gray-900 dark:text-gray-200">
         Edit Sale #{editing}
       </h2>
@@ -1930,6 +1960,11 @@ const handleLineChange = async (lineIdx, field, value, deviceIdx = null, isBlur 
             )}
           </label>
         ))}
+        <CustomerSelector
+          storeId={storeId}
+          selectedCustomerId={saleForm.customer_id}
+          onCustomerChange={(value) => handleEditChange('customer_id', value)}
+        />
         <label className="block">
           <span className="font-semibold block mb-1 text-xs sm:text-sm text-gray-700 dark:text-gray-300">
             Product IDs and Sizes (Optional)
@@ -2012,6 +2047,7 @@ const handleLineChange = async (lineIdx, field, value, deviceIdx = null, isBlur 
             setManualInput('');
             setExternalScannerMode(false);
             setEditing(null);
+            setSelectedCustomerId(null); // Reset customer selection
           }}
           className="p-2 sm:p-2.5 bg-gray-500 text-white rounded-full shadow-sm hover:bg-gray-600 dark:bg-gray-600 dark:hover:bg-gray-500 transition-colors duration-200 min-w-[40px] sm:min-w-[48px] flex items-center justify-center"
           aria-label="Cancel edit sale form"
@@ -2045,6 +2081,7 @@ const handleLineChange = async (lineIdx, field, value, deviceIdx = null, isBlur 
     </form>
   </div>
 )}
+
       {showDetailModal && (
   <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50 p-4 z-50">
     <div className="bg-white dark:bg-gray-900 p-6 rounded-lg shadow-lg w-full max-w-lg max-h-[90vh] overflow-y-auto">
@@ -2201,75 +2238,79 @@ const handleLineChange = async (lineIdx, field, value, deviceIdx = null, isBlur 
          {viewMode === 'list' ? (
            <table className="min-w-full bg-white dark:bg-gray-900 divide-y divide-gray-200">
              <thead className="bg-gray-100 dark:bg-gray-800">
-               <tr>
-                 {['Product', 'Quantity', 'Unit Price', 'Amount', 'Payment', 'Product IDs/Sizes', 'Date Sold', 'Actions'].map((h) => (
-                   <th
-                     key={h}
-                     className="px-4 py-2 text-left text-sm font-semibold text-gray-700 dark:text-gray-200"
-                   >
-                     {h}
-                   </th>
-                 ))}
-               </tr>
-             </thead>
-             <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-               {paginatedSales.map((s, idx) => (
-                 <tr key={s.id}>
-                   <td className="px-4 py-2 text-sm">{s.dynamic_product.name}</td>
-                   <td className="px-4 py-2 text-sm">{s.quantity}</td>
-                   <td className="px-4 py-2 text-sm">₦{formatCurrency(s.unit_price)}</td>
-                   <td className="px-4 py-2 text-sm">₦{formatCurrency(s.amount)}</td>
-                   <td className="px-4 py-2 text-sm">{s.payment_method}</td>
-                   <td className="px-4 py-2 text-sm">
-                     {s.deviceIds.length > 0 ? (
-                       <button
-                         type="button"
-                         onClick={() => openDetailModal(s)}
-                         className="text-indigo-600 hover:underline focus:outline-none"
-                       >
-                         View {s.deviceIds.length} ID{s.deviceIds.length !== 1 ? 's' : ''}
-                       </button>
-                     ) : (
-                       '-'
-                     )}
-                   </td>
-                   <td className="px-4 py-2 text-sm">{new Date(s.sold_at).toLocaleString()}</td>
-                   <td className="px-4 py-2 text-sm flex gap-2">
-                   <button
-  type="button"
-  onClick={() => {
-    setEditing(s.id);
-    setSaleForm({
-      dynamic_product_id: s.dynamic_product_id,
-      quantity: s.quantity,
-      unit_price: s.unit_price,
-      deviceIds: s.deviceIds.length > 0 ? s.deviceIds : [''],
-      deviceSizes: s.deviceSizes.length > 0 ? s.deviceSizes : [''],
-      payment_method: s.payment_method,
-      isQuantityManual: false,
-    });
-    const product = products.find(p => p.id === s.dynamic_product_id);
-    if (product) {
-      checkSoldDevices(product.deviceIds, s.dynamic_product_id, 0);
-    }
-  }}
-  className={`p-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 edit-button-${idx}`}
-  title="Edit sale"
->
-  <FaEdit />
-</button>
-                     <button
-                       type="button"
-                       onClick={() => deleteSale(s)}
-                       className="p-2 bg-red-500 text-white rounded hover:bg-red-600"
-                       title="Delete sale"
-                     >
-                       <FaTrashAlt />
-                     </button>
-                   </td>
-                 </tr>
-               ))}
-             </tbody>
+              <tr>
+    {['Product', 'Customer', 'Quantity', 'Unit Price', 'Amount', 'Payment', 'Product IDs/Sizes', 'Date Sold', 'Actions'].map((h) => (
+      <th
+        key={h}
+        className="px-4 py-2 text-left text-sm font-semibold text-gray-700 dark:text-gray-200"
+      >
+        {h}
+      </th>
+    ))}
+  </tr>
+</thead>
+           <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
+  {paginatedSales.map((s, idx) => (
+    <tr key={s.id}>
+      <td className="px-4 py-2 text-sm">{s.dynamic_product.name}</td>
+      <td className="px-4 py-2 text-sm">{s.customer_name}</td> {/* Add Customer Name */}
+      <td className="px-4 py-2 text-sm">{s.quantity}</td>
+      <td className="px-4 py-2 text-sm">₦{formatCurrency(s.unit_price)}</td>
+      <td className="px-4 py-2 text-sm">₦{formatCurrency(s.amount)}</td>
+      <td className="px-4 py-2 text-sm">{s.payment_method}</td>
+      <td className="px-4 py-2 text-sm">
+        {s.deviceIds.length > 0 ? (
+          <button
+            type="button"
+            onClick={() => openDetailModal(s)}
+            className="text-indigo-600 hover:underline focus:outline-none"
+          >
+            View {s.deviceIds.length} ID{s.deviceIds.length !== 1 ? 's' : ''}
+          </button>
+        ) : (
+          '-'
+        )}
+      </td>
+      <td className="px-4 py-2 text-sm">{new Date(s.sold_at).toLocaleString()}</td>
+      <td className="px-4 py-2 text-sm flex gap-2">
+        <button
+          type="button"
+          onClick={() => {
+            setEditing(s.id);
+            setSaleForm({
+              dynamic_product_id: s.dynamic_product_id,
+              quantity: s.quantity,
+              unit_price: s.unit_price,
+              deviceIds: s.deviceIds.length > 0 ? s.deviceIds : [''],
+              deviceSizes: s.deviceSizes.length > 0 ? s.deviceSizes : [''],
+              payment_method: s.payment_method,
+              customer_id: s.customer_id, // Add customer_id to edit form
+              isQuantityManual: false,
+            });
+            setSelectedCustomerId(s.customer_id); // Set customer for edit
+            const product = products.find(p => p.id === s.dynamic_product_id);
+            if (product) {
+              checkSoldDevices(product.deviceIds, s.dynamic_product_id, 0);
+            }
+          }}
+          className={`p-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 edit-button-${idx}`}
+          title="Edit sale"
+        >
+          <FaEdit />
+        </button>
+        <button
+          type="button"
+          onClick={() => deleteSale(s)}
+          className="p-2 bg-red-500 text-white rounded hover:bg-red-600"
+          title="Delete sale"
+        >
+          <FaTrashAlt />
+        </button>
+      </td>
+    </tr>
+  ))}
+</tbody>
+
            </table>
          ) : (
            <table className="min-w-full bg-white dark:bg-gray-900 divide-y divide-gray-200">

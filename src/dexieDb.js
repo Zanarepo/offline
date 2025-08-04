@@ -1,12 +1,9 @@
-// ✅ 1. src/dexieDB.js
 import Dexie from 'dexie';
 
-const dexieDB = new Dexie('sellytics_offline_db');
-
+const dexieDB = new Dexie('SellyticsDB');
 dexieDB.version(1).stores({
-  dynamic_product: '++id, name, created_at, store_id',
-  dynamic_sales: '++id, dynamic_product_id, sold_at',
-  dynamic_inventory: '++id, dynamic_product_id, store_id',
+  users: 'email_address, hashed_password, role, store_id, user_id, owner_id, admin_id, fullAccess',
+  stores: 'id, shop_name, allowed_dashboard', // Ensure allowed_dashboard is included
 });
 
 export default dexieDB;

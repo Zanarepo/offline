@@ -1,855 +1,272 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { supabase } from '../../supabaseClient';
-import {
-  FaEdit,
-  FaTrashAlt,
-  FaFileCsv,
-  FaFilePdf,
-  FaPlus,
-  FaCamera,
-} from 'react-icons/fa';
-import { ToastContainer, toast } from 'react-toastify';
+import React, { useState, useEffect, useRef } from 'react';
+import { supabase } from "../../supabaseClient";
+import { QRCodeCanvas } from 'qrcode.react';
+import { jsPDF } from 'jspdf';
+import html2canvas from 'html2canvas';
+import { toast, ToastContainer } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
-import { motion } from 'framer-motion';
-import { Html5Qrcode, Html5QrcodeSupportedFormats, Html5QrcodeScannerState } from 'html5-qrcode';
+import { FaDownload, FaQrcode, FaEdit } from 'react-icons/fa';
+import { motion, AnimatePresence } from 'framer-motion';
 
-
-
-const tooltipVariants = {
-  hidden: { opacity: 0, y: 10 },
-  visible: { opacity: 1, y: 0, transition: { duration: 0.3 } },
-};
-
-export default function DynamicProducts() {
-  const storeId = localStorage.getItem('store_id');
-
-  // State
-  const [products, setProducts] = useState([]);
-  const [filtered, setFiltered] = useState([]);
-  const [search, setSearch] = useState('');
-  const [showAdd, setShowAdd] = useState(false);
-  const [addForm, setAddForm] = useState([{
-    name: '',
-    description: '',
-    purchase_price: '',
-    purchase_qty: '',
-    selling_price: '',
-    suppliers_name: '',
-    device_id: '',
-  }]);
+export default function ReceiptQRCode({ singleReceipt = null }) {
+  const storeId = localStorage.getItem("store_id");
+  const [store, setStore] = useState(null);
+  const [saleGroupsList, setSaleGroupsList] = useState([]);
+  const [selectedSaleGroup, setSelectedSaleGroup] = useState(null);
+  const [receipts, setReceipts] = useState([]);
+  const [filteredReceipts, setFilteredReceipts] = useState([]);
+  const [selectedReceipt, setSelectedReceipt] = useState(singleReceipt);
+  const [searchTerm, setSearchTerm] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
   const [editing, setEditing] = useState(null);
-  const [form, setForm] = useState({});
+  const [form, setForm] = useState({ customer_name: "", customer_address: "", phone_number: "", warranty: "" });
+  const [showSaleGroups, setShowSaleGroups] = useState(true);
+  const [showReceipts,] = useState(true);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [onboardingStep, setOnboardingStep] = useState(0);
-  const [showScanner, setShowScanner] = useState(false);
-  const [scannerTarget, setScannerTarget] = useState(null); // { modal: 'add'|'edit', productIndex: number }
-  const [scannerError, setScannerError] = useState(null);
-  const [scannerLoading, setScannerLoading] = useState(false);
-  const [manualInput, setManualInput] = useState('');
-  const [externalScannerMode, setExternalScannerMode] = useState(false);
-  const [scannerBuffer, setScannerBuffer] = useState('');
-  const [lastKeyTime, setLastKeyTime] = useState(0);
-  const [scanSuccess, setScanSuccess] = useState(false);
-
-  const videoRef = useRef(null);
-  const scannerDivRef = useRef(null);
-  const html5QrCodeRef = useRef(null);
-  const manualInputRef = useRef(null);
-
   const itemsPerPage = 20;
-  const paginatedProducts = useMemo(() => {
-    const start = (currentPage - 1) * itemsPerPage;
-    return filtered.slice(start, start + itemsPerPage);
-  }, [filtered, currentPage]);
-  const totalPages = Math.ceil(filtered.length / itemsPerPage);
+  const saleGroupsPerPage = 20;
+  const [headerBgColor] = useState('#1E3A8A');
+  const [headerTextColor] = useState('#FFFFFF');
+  const [headerFont] = useState('font-serif');
+  const [bodyFont] = useState('font-sans');
+  const [watermarkColor] = useState('rgba(30,58,138,0.1)');
+  const printRef = useRef();
+  const saleGroupsRef = useRef();
+  const receiptsRef = useRef();
 
-  // Onboarding steps
   const onboardingSteps = [
-    {
-      target: '.add-product-button',
-      content: 'Click to add a new product to your catalog.',
-    },
-    {
-      target: '.search-input',
-      content: 'Search by product name to filter the catalog.',
-    },
-    {
-      target: products.length > 0 ? '.edit-button-0' : '.add-product-button',
-      content: products.length > 0 ? 'Click to edit product details.' : 'Start by adding your first product!',
-    },
+    { target: '.sales-search', content: 'Search for sale groups by ID, amount, or payment method.' },
+    { target: '.sort-id', content: 'Sort sale groups by ID.' },
+    { target: '.edit-receipt-0', content: 'Edit receipt details here.' },
+    { target: '.generate-receipt-0', content: 'Generate or view the QR code for a receipt.' }
   ];
 
+  const tooltipVariants = {
+    hidden: { opacity: 0, y: -10 },
+    visible: { opacity: 1, y: 0 }
+  };
 
-
-
-useEffect(() => {
-  const successAudio = new Audio('https://freesound.org/data/previews/171/171671_2437358-lq.mp3');
-  const notFoundAudio = new Audio('https://freesound.org/data/previews/171/17167_2437358-lq.mp3');
-  
-  // Preload by setting volume to 0 and playing briefly
-  successAudio.volume = 0;
-  notFoundAudio.volume = 0;
-  successAudio.play().catch(err => console.error('Preload success audio error:', err));
-  notFoundAudio.play().catch(err => console.error('Preload not found audio error:', err));
-  successAudio.pause();
-  notFoundAudio.pause();
-  successAudio.volume = 1;
-  notFoundAudio.volume = 1;
-}, []);
-
-// Modified playSuccessSound function
-const playSuccessSound = () => {
-  const audio = new Audio('https://freesound.org/data/previews/171/171671_2437358-lq.mp3');
-  audio.play().catch((err) => console.error('Audio play error:', err));
-};
-
-// Modified playNotFoundSound function
-const playNotFoundSound = () => {
-  const audio = new Audio('https://freesound.org/data/previews/171/17167_2437358-lq.mp3');
-  audio.play().catch((err) => console.error('Audio play error:', err));
-};
-
-
-  // Check if onboarding has been completed
+  // Onboarding logic
   useEffect(() => {
-    if (!localStorage.getItem('productCatalogOnboardingCompleted')) {
+    if (!localStorage.getItem('receiptManagerOnboardingCompleted')) {
       const timer = setTimeout(() => {
         setShowOnboarding(true);
-      }, 3000); // 3-second delay
+      }, 3000);
       return () => clearTimeout(timer);
     }
   }, []);
 
-  // Auto-focus manual input
+  // Fetch store details
   useEffect(() => {
-    if (showScanner && manualInputRef.current) {
-      manualInputRef.current.focus();
-    }
-  }, [showScanner]);
-
-  // Process scanned barcode
-  const processScannedBarcode = useCallback((scannedCode) => {
-    const trimmedCode = scannedCode.trim();
-    console.log('Processing barcode:', { trimmedCode });
-
-    if (!trimmedCode) {
-      toast.error('Invalid barcode: Empty value');
-      setScannerError('Invalid barcode: Empty value');
-      return false;
-    }
-
-    if (scannerTarget) {
-      const { modal, productIndex } = scannerTarget;
-      let updatedForm;
-
-      if (modal === 'add') {
-        // Check for duplicates in addForm
-        if (addForm.some((p, i) => i !== productIndex && p.device_id.trim().toLowerCase() === trimmedCode.toLowerCase())) {
-          toast.error(`Barcode "${trimmedCode}" already exists in another product`);
-          setScannerError(`Barcode "${trimmedCode}" already exists`);
-          return false;
-        }
-        // Check for duplicates in database
-        const checkDuplicate = async () => {
-          const { data: existingProducts, error } = await supabase
-            .from('dynamic_product')
-            .select('device_id')
-            .eq('store_id', storeId)
-            .neq('device_id', '');
-          if (error) {
-            console.error('Error checking duplicates:', error);
-            toast.error('Failed to check for duplicate barcodes');
-            return false;
-          }
-          if (existingProducts.some(p => p.device_id.trim().toLowerCase() === trimmedCode.toLowerCase())) {
-            toast.error(`Barcode "${trimmedCode}" already exists in the database`);
-            setScannerError(`Barcode "${trimmedCode}" already exists`);
-            return false;
-          }
-          return true;
-        };
-
-        checkDuplicate().then(isValid => {
-          if (!isValid) return;
-          updatedForm = [...addForm];
-          updatedForm[productIndex].device_id = trimmedCode;
-          setAddForm(updatedForm);
-          // Add new line item
-          setAddForm(prev => [...prev, {
-            name: '',
-            description: '',
-            purchase_price: '',
-            purchase_qty: '',
-            selling_price: '',
-            suppliers_name: '',
-            device_id: '',
-          }]);
-
-          
-          setScannerTarget({ modal: 'add', productIndex: updatedForm.length });
-          setScannerError(null);
-          setScanSuccess(true);
-          playSuccessSound();
-          setTimeout(() => setScanSuccess(false), 1000);
-          setManualInput('');
-          if (manualInputRef.current) {
-            manualInputRef.current.focus();
-          }
-        });
-
-
-
-      } else if (modal === 'edit') {
-        // Check for duplicates in database excluding current product
-        const checkDuplicate = async () => {
-          const { data: existingProducts, error } = await supabase
-            .from('dynamic_product')
-            .select('device_id')
-            .eq('store_id', storeId)
-            .neq('id', editing.id)
-            .neq('device_id', '');
-          if (error) {
-            console.error('Error checking duplicates:', error);
-            toast.error('Failed to check for duplicate barcodes');
-            return false;
-          }
-          if (existingProducts.some(p => p.device_id.trim().toLowerCase() === trimmedCode.toLowerCase())) {
-            toast.error(`Barcode "${trimmedCode}" already exists in another product`);
-            setScannerError(`Barcode "${trimmedCode}" already exists`);
-            return false;
-          }
-          return true;
-        };
-
-        checkDuplicate().then(isValid => {
-          if (!isValid) return;
-          setForm(prev => ({ ...prev, device_id: trimmedCode }));
-          setScannerError(null);
-          setScanSuccess(true);
-          playSuccessSound();
-          setTimeout(() => setScanSuccess(false), 1000);
-          setManualInput('');
-          if (manualInputRef.current) {
-            manualInputRef.current.focus();
-          }
-        });
-      }
-      return true;
-    }
-    return false;
-  }, [scannerTarget, addForm, editing, storeId]);
-
-  // External scanner input
-  useEffect(() => {
-    if (!externalScannerMode || !scannerTarget || !showScanner) return;
-
-    const handleKeypress = (e) => {
-      const currentTime = Date.now();
-      const timeDiff = currentTime - lastKeyTime;
-
-      if (timeDiff > 50 && scannerBuffer) {
-        setScannerBuffer('');
-      }
-
-      if (e.key === 'Enter' && scannerBuffer) {
-        const success = processScannedBarcode(scannerBuffer);
-        if (success) {
-          setScannerBuffer('');
-          setManualInput('');
-          if (manualInputRef.current) {
-            manualInputRef.current.focus();
-          }
-        }
-      } else if (e.key !== 'Enter') {
-        setScannerBuffer((prev) => prev + e.key);
-      }
-
-      setLastKeyTime(currentTime);
-    };
-
-    document.addEventListener('keypress', handleKeypress);
-
-    return () => {
-      document.removeEventListener('keypress', handleKeypress);
-    };
-  }, [externalScannerMode, scannerTarget, scannerBuffer, lastKeyTime, showScanner, processScannedBarcode]);
-
-  // Webcam scanner
-  useEffect(() => {
-    if (!showScanner || !scannerDivRef.current || !videoRef.current || externalScannerMode) return;
-
-    setScannerLoading(true);
-    setScanSuccess(false);
-
-    const videoElement = videoRef.current;
-    let html5QrCodeInstance = null;
-
-    try {
-      if (!document.getElementById('scanner')) {
-        console.error('Scanner div not found in DOM');
-        setScannerError('Scanner container not found. Please use manual input.');
-        setScannerLoading(false);
-        toast.error('Scanner container not found. Please use manual input.');
-        return;
-      }
-
-      html5QrCodeInstance = new Html5Qrcode('scanner');
-      html5QrCodeRef.current = html5QrCodeInstance;
-    } catch (err) {
-      console.error('Failed to create Html5Qrcode instance:', err);
-      setScannerError(`Failed to initialize scanner: ${err.message}`);
-      setScannerLoading(false);
-      toast.error('Failed to initialize scanner. Please use manual input.');
-      return;
-    }
-
-   const config = {
-     fps: 60, // High FPS for instant detection
-     qrbox: { width: 250, height: 125 }, // Smaller qrbox for faster focus
-     formatsToSupport: [
-       Html5QrcodeSupportedFormats.CODE_128,
-       Html5QrcodeSupportedFormats.CODE_39,
-       Html5QrcodeSupportedFormats.EAN_13,
-       Html5QrcodeSupportedFormats.UPC_A,
-       Html5QrcodeSupportedFormats.QR_CODE,
-     ],
-     aspectRatio: 1.0, // Square for better alignment
-     disableFlip: true,
-     videoConstraints: { width: 1280, height: 720, facingMode: 'environment' }, // Higher resolution
-   };
-   
-    const onScanSuccess = (decodedText) => {
-      const success = processScannedBarcode(decodedText);
-      if (success) {
-        setScanSuccess(true);
-        playSuccessSound();
-        setTimeout(() => setScanSuccess(false), 1000);
-        setManualInput('');
-        if (manualInputRef.current) {
-          manualInputRef.current.focus();
-        }
-      }
-    };
-
-const onScanFailure = (error) => {
-  if (
-    error.includes('No MultiFormat Readers were able to detect the code') ||
-    error.includes('No QR code found') ||
-    error.includes('IndexSizeError')
-  ) {
-    console.debug('No barcode detected in frame');
-  } else {
-    console.error('Scan error:', error);
-   playNotFoundSound();
-    setScannerError(`Scan error: ${error}. Adjust lighting or distance.`);
-  }
-};
-
-    const startScanner = async (attempt = 1, maxAttempts = 3) => {
-      if (!videoElement || !scannerDivRef.current) {
-        setScannerError('Scanner elements not found');
-        setScannerLoading(false);
-        toast.error('Scanner elements not found. Please use manual input.');
-        return;
-      }
-      if (attempt > maxAttempts) {
-        setScannerError('Failed to initialize scanner after multiple attempts');
-        setScannerLoading(false);
-        toast.error('Failed to initialize scanner. Please use manual input.');
-        return;
-      }
-      try {
-        let stream;
-        try {
-          stream = await navigator.mediaDevices.getUserMedia({
-            video: {
-              ...config.videoConstraints,
-              advanced: [{ focusMode: 'continuous' }],
-            },
-          });
-        } catch (err) {
-          console.warn('Rear camera with autofocus failed, trying fallback:', err);
-          stream = await navigator.mediaDevices.getUserMedia({
-            video: { width: { ideal: 1280 }, height: { ideal: 720 } },
-          });
-        }
-        videoElement.srcObject = stream;
-        await new Promise((resolve) => {
-          videoElement.onloadedmetadata = () => resolve();
-        });
-        await html5QrCodeInstance.start(
-          config.videoConstraints,
-          config,
-          onScanSuccess,
-          onScanFailure
-        );
-        setScannerLoading(false);
-      } catch (err) {
-        console.error('Scanner initialization error:', err);
-        setScannerError(`Failed to initialize scanner: ${err.message}`);
-        setScannerLoading(false);
-        if (err.name === 'NotAllowedError') {
-          toast.error('Camera access denied. Please allow camera permissions.');
-        } else if (err.name === 'NotFoundError') {
-          toast.error('No camera found. Please use manual input.');
-        } else if (err.name === 'OverconstrainedError') {
-          toast.error('Camera constraints not supported. Trying fallback...');
-          setTimeout(() => startScanner(attempt + 1, maxAttempts), 200);
+    if (!storeId) return;
+    supabase
+      .from("stores")
+      .select("shop_name,business_address,phone_number,email_address")
+      .eq("id", storeId)
+      .single()
+      .then(({ data, error }) => {
+        if (error) {
+          console.error('Error fetching store:', error);
+          toast.error('Failed to fetch store details.');
         } else {
-          toast.error('Failed to start camera. Please use manual input.');
+          setStore(data);
         }
-      }
-    };
-
-    Html5Qrcode.getCameras()
-      .then((cameras) => {
-        if (cameras.length === 0) {
-          setScannerError('No cameras detected. Please use manual input.');
-          setScannerLoading(false);
-          toast.error('No cameras detected. Please use manual input.');
-          return;
-        }
-        startScanner();
-      })
-      .catch((err) => {
-        console.error('Error listing cameras:', err);
-        setScannerError(`Failed to access cameras: ${err.message}`);
-        setScannerLoading(false);
-        toast.error('Failed to access cameras. Please use manual input.');
       });
-
-    return () => {
-      if (html5QrCodeInstance && 
-          [Html5QrcodeScannerState.SCANNING, Html5QrcodeScannerState.PAUSED].includes(
-            html5QrCodeInstance.getState()
-          )) {
-        html5QrCodeInstance
-          .stop()
-          .then(() => console.log('Webcam scanner stopped successfully'))
-          .catch((err) => console.error('Error stopping scanner:', err));
-      }
-      if (videoElement && videoElement.srcObject) {
-        videoElement.srcObject.getTracks().forEach((track) => {
-          track.stop();
-        });
-        videoElement.srcObject = null;
-      }
-      html5QrCodeRef.current = null;
-    };
-  }, [showScanner, externalScannerMode, processScannedBarcode]);
-
-  // Stop scanner
-  const stopScanner = useCallback(() => {
-    if (html5QrCodeRef.current && 
-        [Html5QrcodeScannerState.SCANNING, Html5QrcodeScannerState.PAUSED].includes(
-          html5QrCodeRef.current.getState()
-        )) {
-      html5QrCodeRef.current
-        .stop()
-        .then(() => console.log('Scanner stopped successfully'))
-        .catch((err) => console.error('Error stopping scanner:', err));
-    }
-    if (videoRef.current && videoRef.current.srcObject) {
-      videoRef.current.srcObject.getTracks().forEach((track) => {
-        track.stop();
-      });
-      videoRef.current.srcObject = null;
-    }
-    html5QrCodeRef.current = null;
-  }, []);
-
-  // Open scanner
-  const openScanner = (modal, productIndex) => {
-    setScannerTarget({ modal, productIndex });
-    setShowScanner(true);
-    setScannerError(null);
-    setScannerLoading(true);
-    setManualInput('');
-    setExternalScannerMode(false);
-    setScannerBuffer('');
-  };
-
-  // Handle manual input
-  const handleManualInput = () => {
-    const trimmedInput = manualInput.trim();
-    const success = processScannedBarcode(trimmedInput);
-    if (success) {
-      setManualInput('');
-      if (manualInputRef.current) {
-        manualInputRef.current.focus();
-      }
-    }
-  };
-
-  // Handle Enter key for manual input
-  const handleManualInputKeyDown = (e) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      handleManualInput();
-    }
-  };
-
-  // Fetch products
-  const fetchProducts = useCallback(async () => {
-    if (!storeId) {
-      toast.error('No store ID found. Please log in.');
-      return;
-    }
-    const { data, error } = await supabase
-      .from('dynamic_product')
-      .select('id, name, description, purchase_price, purchase_qty, selling_price, suppliers_name, device_id, created_at')
-      .eq('store_id', storeId)
-      .order('id', { ascending: true });
-    if (error) {
-      console.error('Error fetching products:', error.message);
-      toast.error('Failed to fetch products');
-    } else {
-      setProducts(data);
-      setFiltered(data);
-    }
   }, [storeId]);
 
-  useEffect(() => {
-    fetchProducts();
-  }, [fetchProducts]);
-
-  // Search filter
-  useEffect(() => {
-    if (!search) setFiltered(products);
-    else {
-      const q = search.toLowerCase();
-      setFiltered(products.filter(p => p.name.toLowerCase().includes(q) || p.device_id.toLowerCase().includes(q)));
+useEffect(() => {
+  if (!storeId || singleReceipt) return;
+  const fetchSaleGroups = async () => {
+    const { data, error } = await supabase
+      .from('sale_groups')
+      .select(`
+        id,
+        store_id,
+        total_amount,
+        payment_method,
+        created_at,
+        customer_id,
+        dynamic_sales (
+          id,
+          device_id,
+          quantity,
+          amount,
+          sale_group_id,
+          dynamic_product (
+            id,
+            name,
+            selling_price,
+            dynamic_product_imeis
+          )
+        )
+      `)
+      .eq('store_id', storeId)
+      .order('created_at', { ascending: false });
+    if (error) {
+      console.error('Error fetching sale groups:', error);
+      toast.error('Failed to fetch sale groups.');
+      return;
     }
-    setCurrentPage(1);
-  }, [search, products]);
+    setSaleGroupsList(data || []);
+    // Automatically select the latest sale group if none is selected
+    if (data.length > 0 && !selectedSaleGroup) {
+      setSelectedSaleGroup(data[0]);
+    }
+  };
 
-  // Add product handlers
-  const handleAddChange = (e, index) => {
-    const { name, value } = e.target;
-    setAddForm(prev => {
-      const newForm = [...prev];
-      if (name === 'device_id' && value.trim()) {
-        // Check for duplicates in addForm
-        if (newForm.some((p, i) => i !== index && p.device_id.trim().toLowerCase() === value.trim().toLowerCase())) {
-          toast.error(`Barcode "${value.trim()}" already exists in another product`);
-          return newForm;
+  fetchSaleGroups();
+
+  // Subscribe to real-time inserts on sale_groups
+  const subscription = supabase
+    .channel('sale_groups_channel')
+    .on('postgres_changes', 
+      { event: 'INSERT', schema: 'public', table: 'sale_groups', filter: `store_id=eq.${storeId}` },
+      (payload) => {
+        fetchSaleGroups();
+      }
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(subscription);
+  };
+}, [storeId, singleReceipt, selectedSaleGroup]);
+
+useEffect(() => {
+  if (!selectedSaleGroup) {
+    setReceipts([]);
+    return;
+  }
+  (async () => {
+    let { data: receiptData } = await supabase
+      .from("receipts")
+      .select("*")
+      .eq("sale_group_id", selectedSaleGroup.id)
+      .order('id', { ascending: false });
+
+    if (receiptData.length === 0 && selectedSaleGroup.dynamic_sales?.length > 0) {
+      const firstSale = selectedSaleGroup.dynamic_sales[0];
+      const totalQuantity = selectedSaleGroup.dynamic_sales.reduce((sum, sale) => sum + sale.quantity, 0);
+      const totalAmount = selectedSaleGroup.dynamic_sales.reduce((sum, sale) => sum + sale.amount, 0);
+
+      let customer_name = "";
+      let phone_number = "";
+      let customer_address = "";
+      if (selectedSaleGroup.customer_id) {
+        const { data: customer, error: customerError } = await supabase
+          .from("customer")
+          .select("fullname, phone_number, address")
+          .eq("id", selectedSaleGroup.customer_id)
+          .single();
+        if (customerError) {
+          console.error('Error fetching customer:', customerError);
+          toast.error('Failed to fetch customer details.');
+        } else {
+          customer_name = customer.fullname || "";
+          phone_number = customer.phone_number || "";
+          customer_address = customer.address || "";
         }
       }
-      newForm[index][name] = value;
-      return newForm;
-    });
-  };
 
-  const removeProduct = (index) => {
-    setAddForm(prev => prev.filter((_, i) => i !== index));
-  };
-
-  const addAnotherProduct = () => {
-    setAddForm(prev => [...prev, {
-      name: '',
-      description: '',
-      purchase_price: '',
-      purchase_qty: '',
-      selling_price: '',
-      suppliers_name: '',
-      device_id: '',
-    }]);
-  };
-
-  const createProducts = async (e) => {
-    e.preventDefault();
-    if (addForm.length === 0) {
-      toast.error('Please add at least one product');
-      return;
-    }
-    const isValid = addForm.every(product =>
-      product.name && product.purchase_qty
-    );
-    if (!isValid) {
-      toast.error('Please fill all required fields for each product');
-      return;
-    }
-    // Check for duplicate device_ids
-    const allDeviceIds = addForm
-      .filter(p => p.device_id.trim())
-      .map(p => p.device_id.trim().toLowerCase());
-    const uniqueDeviceIds = new Set(allDeviceIds);
-    if (uniqueDeviceIds.size < allDeviceIds.length) {
-      toast.error('Duplicate barcodes detected within the new products');
-      return;
-    }
-    // Check for duplicates in database
-    const { data: existingProducts, error: fetchError } = await supabase
-      .from('dynamic_product')
-      .select('device_id')
-      .eq('store_id', storeId)
-      .neq('device_id', '');
-    if (fetchError) {
-      console.error('Error checking duplicates:', fetchError);
-      toast.error('Failed to check for duplicate barcodes');
-      return;
-    }
-    const duplicates = allDeviceIds.filter(id => existingProducts.some(p => p.device_id.trim().toLowerCase() === id));
-    if (duplicates.length > 0) {
-      toast.error(`Barcodes already exist in other products: ${duplicates.join(', ')}`);
-      return;
-    }
-
-    const productsToInsert = addForm.map(product => ({
-      store_id: storeId,
-      name: product.name,
-      description: product.description,
-      purchase_price: parseFloat(product.purchase_price) || 0,
-      purchase_qty: parseInt(product.purchase_qty) || 0,
-      selling_price: parseFloat(product.selling_price) || 0,
-      suppliers_name: product.suppliers_name,
-      device_id: product.device_id
-    }));
-    const { data: insertedProducts, error: insertError } = await supabase
-      .from('dynamic_product')
-      .insert(productsToInsert)
-      .select();
-    if (insertError) {
-      toast.error(`Failed to add products: ${insertError.message}`);
-      return;
-    }
-
-    const inventoryUpdates = insertedProducts.map(product => ({
-      dynamic_product_id: product.id,
-      store_id: storeId,
-      available_qty: parseInt(product.purchase_qty),
-      quantity_sold: 0,
-      last_updated: new Date().toISOString()
-    }));
-    const { error: inventoryError } = await supabase
-      .from('dynamic_inventory')
-      .upsert(inventoryUpdates, { onConflict: ['dynamic_product_id', 'store_id'] });
-    if (inventoryError) {
-      toast.error(`Failed to update inventory: ${inventoryError.message}`);
-      return;
-    }
-
-    toast.success('Products added successfully');
-    setShowAdd(false);
-    setAddForm([{
-      name: '',
-      description: '',
-      purchase_price: '',
-      purchase_qty: '',
-      selling_price: '',
-      suppliers_name: '',
-      device_id: '',
-    }]);
-    fetchProducts();
-  };
-
-  // Edit handlers
-  const startEdit = p => {
-    setEditing(p);
-    setForm({
-      name: p.name,
-      description: p.description || '',
-      purchase_price: p.purchase_price,
-      purchase_qty: p.purchase_qty,
-      selling_price: p.selling_price,
-      suppliers_name: p.suppliers_name || '',
-      device_id: p.device_id || '',
-    });
-  };
-
-  const handleFormChange = e => {
-    const { name, value } = e.target;
-    if (name === 'device_id' && value.trim()) {
-      // Check for duplicates in database excluding current product
-      const checkDuplicate = async () => {
-        const { data: existingProducts, error } = await supabase
-          .from('dynamic_product')
-          .select('device_id')
-          .eq('store_id', storeId)
-          .neq('id', editing.id)
-          .neq('device_id', '');
-        if (error) {
-          console.error('Error checking duplicates:', error);
-          toast.error('Failed to check for duplicate barcodes');
-          return false;
-        }
-        if (existingProducts.some(p => p.device_id.trim().toLowerCase() === value.trim().toLowerCase())) {
-          toast.error(`Barcode "${value.trim()}" already exists in another product`);
-          return false;
-        }
-        return true;
+      const receiptInsert = {
+        store_receipt_id: selectedSaleGroup.store_id,
+        sale_group_id: selectedSaleGroup.id,
+        product_id: firstSale.dynamic_product.id,
+        sales_amount: totalAmount,
+        sales_qty: totalQuantity,
+        product_name: firstSale.dynamic_product.name,
+        device_id: firstSale.device_id || null,
+        customer_name,
+        customer_address,
+        phone_number,
+        warranty: "",
+        date: new Date(selectedSaleGroup.created_at).toISOString(),
+        receipt_id: `RCPT-${selectedSaleGroup.id}-${Date.now()}`
       };
-      checkDuplicate().then(isValid => {
-        if (isValid) {
-          setForm(f => ({ ...f, [name]: value }));
-        }
-      });
-    } else {
-      setForm(f => ({ ...f, [name]: value }));
-    }
-  };
 
-  const saveEdit = async () => {
-    if (!form.name || !form.purchase_qty) {
-      toast.error('Please fill all required fields');
-      return;
-    }
-
-    const restockQty = parseInt(form.purchase_qty);
-    if (restockQty <= 0) {
-      toast.error('Restock quantity must be greater than zero');
-      return;
-    }
-
-    // Check for duplicate device_id
-    if (form.device_id.trim()) {
-      const { data: existingProducts, error } = await supabase
-        .from('dynamic_product')
-        .select('device_id')
-        .eq('store_id', storeId)
-        .neq('id', editing.id)
-        .neq('device_id', '');
+      const { data: newReceipt, error } = await supabase
+        .from("receipts")
+        .insert([receiptInsert])
+        .select()
+        .single();
       if (error) {
-        console.error('Error checking duplicates:', error);
-        toast.error('Failed to check for duplicate barcodes');
+        console.error('Error creating receipt:', error);
+        toast.error('Failed to create receipt.');
         return;
       }
-      if (existingProducts.some(p => p.device_id.trim().toLowerCase() === form.device_id.trim().toLowerCase())) {
-        toast.error(`Barcode "${form.device_id.trim()}" already exists in another product`);
-        return;
-      }
+      receiptData = [newReceipt];
     }
 
-    const productUpdate = {
-      name: form.name,
-      description: form.description,
-      purchase_price: parseFloat(form.purchase_price) || 0,
-      purchase_qty: restockQty,
-      selling_price: parseFloat(form.selling_price) || 0,
-      suppliers_name: form.suppliers_name,
-      device_id: form.device_id,
-    };
-    const { error: productError } = await supabase
-      .from('dynamic_product')
-      .update(productUpdate)
-      .eq('id', editing.id);
-    if (productError) {
-      toast.error(`Failed to update product: ${productError.message}`);
-      return;
+    if (receiptData.length > 1) {
+      const [latestReceipt] = receiptData;
+      await supabase
+        .from("receipts")
+        .delete()
+        .eq("sale_group_id", selectedSaleGroup.id)
+        .neq("id", latestReceipt.id);
+      receiptData = [latestReceipt];
     }
 
-    const { data: inventoryData, error: fetchInventoryError } = await supabase
-      .from('dynamic_inventory')
-      .select('available_qty, quantity_sold')
-      .eq('dynamic_product_id', editing.id)
-      .eq('store_id', storeId)
-      .maybeSingle();
+    setReceipts(receiptData || []);
+    setSelectedReceipt(receiptData[0] || null);
+  })();
+}, [selectedSaleGroup]);
 
-    let newAvailableQty = restockQty;
-    let existingQuantitySold = 0;
-    if (inventoryData) {
-      newAvailableQty = inventoryData.available_qty + restockQty;
-      existingQuantitySold = inventoryData.quantity_sold || 0;
-    } else if (fetchInventoryError) {
-      toast.error(`Failed to fetch inventory: ${fetchInventoryError.message}`);
-      return;
+
+
+  // Filter receipts based on search term
+  useEffect(() => {
+    const term = searchTerm.toLowerCase();
+    const dateStr = selectedSaleGroup ? new Date(selectedSaleGroup.created_at).toLocaleDateString().toLowerCase() : '';
+    setFilteredReceipts(
+      receipts.filter(r => {
+        const fields = [
+          r.receipt_id,
+          String(r.sale_group_id),
+          r.product_name,
+          String(r.sales_qty),
+          r.device_id,
+          r.sales_amount != null ? `₦${r.sales_amount.toFixed(2)}` : '',
+          r.customer_name,
+          r.customer_address,
+          r.phone_number,
+          r.warranty,
+          dateStr
+        ];
+        return fields.some(f => f?.toString().toLowerCase().includes(term));
+      })
+    );
+    setCurrentPage(1);
+  }, [searchTerm, receipts, selectedSaleGroup]);
+
+  // Smooth scrolling for sale groups and receipts
+  useEffect(() => {
+    if (saleGroupsRef.current && showSaleGroups) {
+      saleGroupsRef.current.scrollIntoView({ behavior: 'smooth' });
     }
+  }, [saleGroupsList, showSaleGroups]);
 
-    const inventoryUpdate = {
-      dynamic_product_id: editing.id,
-      store_id: storeId,
-      available_qty: newAvailableQty,
-      quantity_sold: existingQuantitySold,
-      last_updated: new Date().toISOString(),
-    };
-    const { error: inventoryError } = await supabase
-      .from('dynamic_inventory')
-      .upsert([inventoryUpdate], { onConflict: ['dynamic_product_id', 'store_id'] });
-    if (inventoryError) {
-      toast.error(`Failed to update inventory: ${inventoryError.message}`);
-      return;
+  useEffect(() => {
+    if (receiptsRef.current && showReceipts) {
+      receiptsRef.current.scrollIntoView({ behavior: 'smooth' });
     }
+  }, [receipts, showReceipts]);
 
-    toast.success('Product restocked successfully');
-    setEditing(null);
-    fetchProducts();
-  };
-
-  const deleteProduct = async p => {
-    if (window.confirm(`Delete product "${p.name}"?`)) {
-      const { error } = await supabase.from('dynamic_product').delete().eq('id', p.id);
-      if (error) {
-        toast.error(`Failed to delete product: ${error.message}`);
-      } else {
-        await supabase
-          .from('dynamic_inventory')
-          .delete()
-          .eq('dynamic_product_id', p.id)
-          .eq('store_id', storeId);
-        toast.success('Product deleted successfully');
-        fetchProducts();
-      }
-    }
-  };
-
-  // Export CSV
-  const exportCSV = () => {
-    let csv = "data:text/csv;charset=utf-8,";
-    csv += "Name,Description,PurchasePrice,Qty,SellingPrice,Supplier,DeviceID,CreatedAt\n";
-    filtered.forEach(p => {
-      const row = [
-        p.name,
-        (p.description || '').replace(/,/g, ' '),
-        parseFloat(p.purchase_price).toFixed(2),
-        p.purchase_qty,
-        parseFloat(p.selling_price).toFixed(2),
-        p.suppliers_name || '',
-        p.device_id || '',
-        p.created_at
-      ].join(',');
-      csv += row + '\n';
-    });
-    const link = document.createElement('a');
-    link.href = encodeURI(csv);
-    link.download = 'dynamic_products.csv';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
-  // Export PDF
-  const exportPDF = () => {
-    import('jspdf').then(({ jsPDF }) => {
-      const doc = new jsPDF();
-      let y = 10;
-      doc.text('Dynamic Products', 10, y);
-      y += 10;
-      filtered.forEach(p => {
-        const line = `Name: ${p.name}, Purchase: $${parseFloat(p.purchase_price).toFixed(2)}, Qty: ${p.purchase_qty}, Sell: $${parseFloat(p.selling_price).toFixed(2)}, Barcode: ${p.device_id || ''}`;
-        doc.text(line, 10, y);
-        y += 10;
-      });
-      doc.save('dynamic_products.pdf');
-    });
-  };
-
-  // Onboarding handlers
   const handleNextStep = () => {
     if (onboardingStep < onboardingSteps.length - 1) {
       setOnboardingStep(onboardingStep + 1);
     } else {
       setShowOnboarding(false);
-      localStorage.setItem('productCatalogOnboardingCompleted', 'true');
+      localStorage.setItem('receiptManagerOnboardingCompleted', 'true');
     }
   };
 
   const handleSkipOnboarding = () => {
     setShowOnboarding(false);
-    localStorage.setItem('productCatalogOnboardingCompleted', 'true');
+    localStorage.setItem('receiptManagerOnboardingCompleted', 'true');
   };
 
-  // Tooltip positioning
   const getTooltipPosition = (target) => {
     const element = document.querySelector(target);
     if (!element) return { top: 0, left: 0 };
@@ -860,476 +277,556 @@ const onScanFailure = (error) => {
     };
   };
 
+  const getProductGroups = () => {
+    if (!selectedSaleGroup || !selectedSaleGroup.dynamic_sales) return [];
+
+    const productMap = new Map();
+    selectedSaleGroup.dynamic_sales.forEach(sale => {
+      const product = sale.dynamic_product;
+      const deviceIds = sale.device_id?.split(',').filter(id => id.trim()) || [];
+      const quantity = sale.quantity;
+      const unitPrice = sale.amount / sale.quantity;
+      const totalAmount = sale.amount;
+
+      if (!productMap.has(product.id)) {
+        productMap.set(product.id, {
+          productId: product.id,
+          productName: product.name,
+          deviceIds,
+          quantity,
+          unitPrice,
+          totalAmount,
+          sellingPrice: product.selling_price || unitPrice
+        });
+      } else {
+        const existing = productMap.get(product.id);
+        existing.deviceIds = [...new Set([...existing.deviceIds, ...deviceIds])];
+        existing.quantity += quantity;
+        existing.totalAmount += totalAmount;
+      }
+    });
+
+    return Array.from(productMap.values());
+  };
+
+  const productGroups = getProductGroups();
+  const totalQuantity = productGroups.reduce((sum, group) => sum + group.quantity, 0);
+  const totalAmount = productGroups.reduce((sum, group) => sum + group.totalAmount, 0);
+
+  const generatePDF = async () => {
+    const element = printRef.current;
+    if (!element) {
+      toast.error('Receipt content not found.');
+      return;
+    }
+
+    try {
+      const canvas = await html2canvas(element, { scale: 2, useCORS: true });
+      const imgData = canvas.toDataURL('image/jpeg', 0.8);
+      const { width, height } = canvas;
+
+      const pdfWidth = 595;
+      const pdfHeight = 842;
+      const aspectRatio = width / height;
+      let newWidth = pdfWidth;
+      let newHeight = pdfWidth / aspectRatio;
+
+      if (newHeight > pdfHeight) {
+        newHeight = pdfHeight;
+        newWidth = pdfHeight * aspectRatio;
+      }
+
+      const pdf = new jsPDF({
+        orientation: newWidth > newHeight ? 'landscape' : 'portrait',
+        unit: 'pt',
+        format: 'a4'
+      });
+
+      pdf.addImage(imgData, 'JPEG', 0, 0, newWidth, newHeight);
+      pdf.save(`receipt-${selectedReceipt?.receipt_id}.pdf`);
+      toast.success('Receipt downloaded successfully!');
+    } catch (error) {
+      console.error('Generate PDF error:', error);
+      toast.error('Failed to generate PDF.');
+    }
+  };
+
+  const handleViewQRCode = (receipt) => {
+    setSelectedReceipt(receipt);
+    setSelectedSaleGroup(receipt.sale_groups);
+  };
+
+  const openEdit = (receipt) => {
+    setEditing(receipt);
+    setForm({
+      customer_name: receipt.customer_name || "",
+      customer_address: receipt.customer_address || "",
+      phone_number: receipt.phone_number || "",
+      warranty: receipt.warranty || ""
+    });
+  };
+
+  const handleChange = e => setForm(f => ({ ...f, [e.target.name]: e.target.value }));
+
+ const saveReceipt = async () => {
+  try {
+    if (!selectedSaleGroup.customer_id) {
+      toast.error('No customer associated with this sale group.');
+      return;
+    }
+
+    // Update customer table with fullname, phone_number, and address
+    const { error: customerError } = await supabase
+      .from("customer")
+      .update({
+        fullname: form.customer_name,
+        phone_number: form.phone_number,
+        address: form.customer_address
+      })
+      .eq("id", selectedSaleGroup.customer_id);
+    if (customerError) {
+      console.error('Error updating customer:', customerError);
+      throw new Error('Failed to update customer details.');
+    }
+
+    // Update receipts table with warranty and mirrored customer details
+    const { error: receiptError } = await supabase
+      .from("receipts")
+      .update({
+        customer_name: form.customer_name,
+        customer_address: form.customer_address,
+        phone_number: form.phone_number,
+        warranty: form.warranty
+      })
+      .eq("id", editing.id);
+    if (receiptError) {
+      console.error('Error updating receipt:', receiptError);
+      throw new Error('Failed to update receipt.');
+    }
+
+    // Refresh receipts
+    const { data } = await supabase
+      .from("receipts")
+      .select("*")
+      .eq("sale_group_id", selectedSaleGroup.id)
+      .order('id', { ascending: false });
+    setReceipts(data);
+    setEditing(null);
+    setForm({ customer_name: "", customer_address: "", phone_number: "", warranty: "" });
+    toast.success('Receipt updated successfully!');
+  } catch (error) {
+    console.error('Error updating receipt:', error);
+    toast.error(error.message);
+  }
+};
+
+  const qrCodeUrl = selectedReceipt ? `${window.location.origin}/receipt/${selectedReceipt.receipt_id}` : '';
+
+  const totalPages = Math.ceil(filteredReceipts.length / itemsPerPage);
+  const startIndex = (currentPage - 1) * itemsPerPage;
+  const endIndex = startIndex + itemsPerPage;
+  const paginatedReceipts = filteredReceipts.slice(startIndex, endIndex);
+
+  const filteredSaleGroups = saleGroupsList.filter(sg => {
+    const term = searchTerm.toLowerCase();
+    const fields = [
+      `#${sg.id}`,
+      `₦${sg.total_amount.toFixed(2)}`,
+      sg.payment_method,
+      new Date(sg.created_at).toLocaleString().toLowerCase()
+    ];
+    return fields.some(f => f.toLowerCase().includes(term));
+  });
+
+  const totalSaleGroupsPages = Math.ceil(filteredSaleGroups.length / saleGroupsPerPage);
+  const startSaleGroupsIndex = (currentPage - 1) * saleGroupsPerPage;
+  const endSaleGroupsIndex = startSaleGroupsIndex + saleGroupsPerPage;
+  const paginatedSaleGroups = filteredSaleGroups.slice(startSaleGroupsIndex, endSaleGroupsIndex);
+
+  const handleSaleGroupsPageChange = (page) => {
+    if (page >= 1 && page <= totalSaleGroupsPages) {
+      setCurrentPage(page);
+    }
+  };
+
+  const handlePageChange = (page) => {
+    if (page >= 1 && page <= totalPages) {
+      setCurrentPage(page);
+    }
+  };
+
+  const printStyles = `
+    @media print {
+      body * { visibility: hidden; }
+      .printable-area, .printable-area * { visibility: visible; }
+      .printable-area { position: absolute; top:0; left:0; width:100%; }
+      .printable-area table { page-break-inside: auto; }
+      .printable-area tr { page-break-inside: avoid; break-inside: avoid; }
+      .sm\\:hidden { display: none; }
+      .sm\\:table-row { display: table-row; }
+      .sm\\:table-cell { display: table-cell; }
+    }
+  `;
+
   return (
-    <div className="p-0">
+    <>
+      <style>{printStyles}</style>
       <ToastContainer position="top-right" autoClose={3000} />
-
-      {/* Search & Add */}
-      <div className="flex flex-col sm:flex-row items-center gap-2 mb-4">
-        <input
-          type="text"
-          placeholder="Search products or barcodes..."
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-          className="w-full p-2 border rounded dark:bg-gray-900 dark:text-white search-input"
-        />
-        <button
-          onClick={() => {
-            setShowAdd(true);
-            setScannerTarget({ modal: 'add', productIndex: 0 });
-          }}
-          className="w-full sm:w-auto flex items-center gap-1 px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 add-product-button"
-        >
-          <FaPlus /> Products
-        </button>
-      </div>
-{/* Add Modal */}
-{showAdd && (
-  <div className="fixed inset-0 bg-black bg-opacity-50 flex items-start justify-center p-4 z-50 overflow-auto mt-16">
-    <div className="bg-white dark:bg-gray-900 p-6 rounded-lg shadow-lg w-full max-w-3xl max-h-[85vh] overflow-y-auto space-y-4">
-      <h2 className="text-lg sm:text-xl font-bold text-center text-gray-900 dark:text-gray-200">
-        Add Products
-      </h2>
-      <form onSubmit={createProducts} className="space-y-4">
-        {addForm.map((product, index) => (
-          <div key={index} className="border border-gray-200 dark:border-gray-700 p-3 sm:p-4 rounded-lg space-y-3 dark:bg-gray-800">
-            <div className="flex justify-between items-center">
-              <h3 className="font-semibold text-sm sm:text-base text-gray-900 dark:text-gray-200">
-                Product {index + 1}
-              </h3>
-              {addForm.length > 1 && (
-                <button
-                  type="button"
-                  onClick={() => removeProduct(index)}
-                  className="p-1.5 bg-red-600 text-white rounded-full shadow-sm hover:bg-red-700 dark:bg-red-500 dark:hover:bg-red-600 transition-colors duration-200"
-                  aria-label="Remove product"
-                >
-                  <svg
-                    className="w-3.5 h-3.5 sm:w-4 sm:h-4"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                    xmlns="http://www.w3.org/2000/svg"
-                  >
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              )}
+      <div className="p-4 sm:p-6 space-y-6 dark:bg-gray-900 dark:text-white">
+        {!singleReceipt && (
+          <>
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-xl sm:text-2xl font-bold text-gray-800 dark:text-white">Store Receipts</h2>
+              <button
+                onClick={() => setShowSaleGroups(!showSaleGroups)}
+                className="px-3 sm:px-4 py-1.5 sm:py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors text-sm sm:text-base"
+              >
+                {showSaleGroups ? 'Hide Sale Groups' : 'Show Sale Groups'}
+              </button>
             </div>
-            <div className="grid grid-cols-1 gap-3 sm:gap-4">
-              {[
-                { name: 'name', label: 'Name' },
-                { name: 'description', label: 'Description' },
-                { name: 'purchase_price', label: 'Total Purchase Price' },
-                { name: 'purchase_qty', label: 'Quantity Purchased' },
-                { name: 'selling_price', label: 'Selling Price' },
-                { name: 'suppliers_name', label: 'Supplier Name' },
-                { name: 'device_id', label: 'Barcode' },
-              ].map(field => (
-                <label key={field.name} className="block">
-                  <span className="font-semibold block mb-1 text-xs sm:text-sm text-gray-700 dark:text-gray-300">
-                    {field.label}
-                  </span>
-                  <div className="flex items-center gap-2 sm:gap-3">
-                    <input
-                      type={field.name.includes('price') || field.name.includes('qty') ? 'number' : 'text'}
-                      step={field.name.includes('price') ? '0.01' : undefined}
-                      name={field.name}
-                      value={product[field.name]}
-                      onChange={(e) => handleAddChange(e, index)}
-                      required={['name', 'purchase_qty'].includes(field.name)}
-                      className={`flex-1 p-2 sm:p-3 border rounded-lg dark:bg-gray-900 dark:text-white dark:border-gray-600 focus:ring-2 focus:ring-indigo-500 text-sm min-w-[100px] ${
-                        field.name === 'device_id' && product.device_id.trim() &&
-                        addForm.some((p, i) => i !== index && p.device_id.trim().toLowerCase() === product.device_id.trim().toLowerCase())
-                          ? 'border-red-500'
-                          : ''
-                      }`}
-                    />
-                    {field.name === 'device_id' && (
-                      <button
-                        type="button"
-                        onClick={() => openScanner('add', index)}
-                        className="p-2 sm:p-2.5 bg-indigo-600 text-white rounded-full shadow-sm hover:bg-indigo-700 dark:bg-indigo-500 dark:hover:bg-indigo-600 transition-colors duration-200"
-                        aria-label="Scan barcode for device ID"
-                      >
-                        <FaCamera className="w-4 h-4 sm:w-4.5 sm:h-4.5" />
-                      </button>
-                    )}
-                  </div>
-                </label>
-              ))}
-            </div>
-          </div>
-        ))}
-        <button
-          type="button"
-          onClick={addAnotherProduct}
-          className="p-2 sm:p-3 bg-green-600 text-white rounded-full shadow-sm hover:bg-green-700 dark:bg-green-500 dark:hover:bg-green-600 transition-colors duration-200 w-full sm:w-auto flex items-center justify-center gap-2"
-          aria-label="Add another product"
-        >
-          <svg
-            className="w-4 h-4 sm:w-5 sm:h-5"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-            xmlns="http://www.w3.org/2000/svg"
-          >
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
-          </svg>
-          <span className="text-sm sm:text-base">Add Another Product</span>
-        </button>
-        <div className="flex justify-end gap-2 sm:gap-3 mt-4">
-          <button
-            type="button"
-            onClick={() => {
-              setShowAdd(false);
-              stopScanner();
-            }}
-            className="p-2 sm:p-3 bg-gray-500 text-white rounded-full shadow-sm hover:bg-gray-600 dark:bg-gray-600 dark:hover:bg-gray-500 transition-colors duration-200"
-            aria-label="Cancel product form"
-          >
-            <svg
-              className="w-4 h-4 sm:w-5 sm:h-5"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-              xmlns="http://www.w3.org/2000/svg"
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-          <button
-            type="submit"
-            className="p-2 sm:p-3 bg-indigo-600 text-white rounded-full shadow-sm hover:bg-indigo-700 dark:bg-indigo-500 dark:hover:bg-indigo-600 transition-colors duration-200"
-            aria-label="Create products"
-          >
-            <svg
-              className="w-4 h-4 sm:w-5 sm:h-5"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-              xmlns="http://www.w3.org/2000/svg"
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
-            </svg>
-          </button>
-        </div>
-      </form>
-    </div>
-  </div>
-)}
-
-      {/* Table */}
-      <div className="overflow-x-auto bg-white dark:bg-gray-900 rounded-lg shadow dark:text-white">
-        <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-          <thead className="bg-gray-200 dark:bg-gray-700">
-            <tr>
-              {['Name', 'Descrip', 'Purchase', 'Qty', 'Sell. Price', 'Supplier', 'Product Barcode', 'Date', 'Edit/Restock'].map(h => (
-                <th key={h} className="px-4 py-2 text-left text-sm font-semibold dark:bg-gray-900 dark:text-indigo-600">{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
-            {paginatedProducts.map((p, index) => (
-              <tr key={p.id}>
-                <td className="px-4 py-2 text-sm">{p.name}</td>
-                <td className="px-4 py-2 text-sm">{p.description}</td>
-                <td className="px-4 py-2 text-sm">
-                  {p.purchase_price != null
-                    ? parseFloat(p.purchase_price).toFixed(2)
-                    : ''}
-                </td>
-                <td className="px-4 py-2 text-sm">{p.purchase_qty}</td>
-                <td className="px-4 py-2 text-sm">
-                  {p.selling_price != null
-                    ? parseFloat(p.selling_price).toFixed(2)
-                    : ''}
-                </td>
-                <td className="px-4 py-2 text-sm">{p.suppliers_name}</td>
-                <td className="px-4 py-2 text-sm">{p.device_id}</td>
-                <td className="px-4 py-2 text-sm">
-                  {new Date(p.created_at).toLocaleDateString()}
-                </td>
-                <td className="px-4 py-2 flex gap-2">
-                  <button onClick={() => startEdit(p)} className={`text-indigo-600 hover:text-indigo-800 edit-button-${index}`}>
-                    <FaEdit />
-                  </button>
-                  <button onClick={() => deleteProduct(p)} className="text-red-600 hover:text-red-800">
-                    <FaTrashAlt />
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Pagination */}
-      <div className="flex flex-wrap justify-center items-center gap-2 mt-4">
-        <button
-          onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
-          disabled={currentPage === 1}
-          className="px-3 py-1 bg-gray-200 dark:bg-gray-700 rounded disabled:opacity-50"
-        >
-          Prev
-        </button>
-        {[...Array(totalPages)].map((_, i) => (
-          <button
-            key={i}
-            onClick={() => setCurrentPage(i + 1)}
-            className={`px-3 py-1 rounded ${currentPage === i + 1
-              ? 'bg-indigo-600 text-white'
-              : 'bg-gray-200 hover:bg-gray-300'}`}
-          >
-            {i + 1}
-          </button>
-        ))}
-        <button
-          onClick={() => setCurrentPage(prev => Math.min(prev + 1, totalPages))}
-          disabled={currentPage === totalPages}
-          className="px-3 py-1 bg-gray-200 dark:bg-gray-700 rounded disabled:opacity-50"
-        >
-          Next
-        </button>
-      </div>
-
-      {/* Exports */}
-      <div className="flex justify-center gap-4 mt-4">
-        <button onClick={exportCSV} className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700">
-          <FaFileCsv /> CSV
-        </button>
-        <button onClick={exportPDF} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700">
-          <FaFilePdf /> PDF
-        </button>
-      </div>
-{/* Edit Modal */}
-{editing && (
-  <div className="fixed inset-0 bg-black bg-opacity-50 flex items-start justify-center p-4 z-50 overflow-auto mt-16">
-    <div className="bg-white rounded-lg shadow-lg w-full max-w-full sm:max-w-lg max-h-[85vh] overflow-y-auto p-4 sm:p-6 space-y-4 dark:bg-gray-900 dark:text-white">
-      <h2 className="text-lg sm:text-xl font-bold text-center text-gray-900 dark:text-gray-200">
-        Edit {editing.name}
-      </h2>
-      <div className="grid grid-cols-1 gap-3 sm:gap-4">
-        {[
-          { name: 'name', label: 'Name' },
-          { name: 'description', label: 'Description' },
-          { name: 'purchase_price', label: 'Total Purchase Price' },
-          { name: 'purchase_qty', label: 'Qty Purchased (Restock)' },
-          { name: 'selling_price', label: 'Selling Price' },
-          { name: 'suppliers_name', label: 'Supplier Name' },
-          { name: 'device_id', label: 'Barcode' },
-        ].map(field => (
-          <label key={field.name} className="block">
-            <span className="font-semibold block mb-1 text-xs sm:text-sm text-gray-700 dark:text-gray-300">
-              {field.label}
-            </span>
-            <div className="flex items-center gap-2 sm:gap-3">
+            <div className="mb-6">
               <input
-                type={field.name.includes('price') || field.name.includes('qty') ? 'number' : 'text'}
-                step={field.name.includes('price') ? '0.01' : undefined}
-                name={field.name}
-                value={form[field.name]}
-                onChange={handleFormChange}
-                required={['name', 'purchase_qty'].includes(field.name)}
-                className="flex-1 p-2 sm:p-3 border rounded-lg dark:bg-gray-900 dark:text-white dark:border-gray-600 focus:ring-2 focus:ring-indigo-500 text-sm min-w-[100px]"
+                type="text"
+                value={searchTerm}
+                onChange={e => setSearchTerm(e.target.value)}
+                placeholder="Search by Sale Group ID, Amount, Payment Method, or Receipt Details"
+                className="flex-1 border border-gray-300 dark:border-gray-600 px-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:bg-gray-800 dark:text-white sales-search"
               />
-              {field.name === 'device_id' && (
-                <button
-                  type="button"
-                  onClick={() => openScanner('edit', 0)}
-                  className="p-2 sm:p-2.5 bg-indigo-600 text-white rounded-full shadow-sm hover:bg-indigo-700 dark:bg-indigo-500 dark:hover:bg-indigo-600 transition-colors duration-200"
-                  aria-label="Scan barcode for device ID"
+            </div>
+            <AnimatePresence>
+              {showSaleGroups && (
+                <motion.div
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: 'auto', opacity: 1 }}
+                  exit={{ height: 0, opacity: 0 }}
+                  transition={{ duration: 0.3 }}
+                  className="overflow-hidden"
                 >
-                  <FaCamera className="w-4 h-4 sm:w-4.5 sm:h-4.5" />
-                </button>
+                  <div ref={saleGroupsRef} className="overflow-x-auto rounded-lg shadow">
+                    <table className="min-w-full text-xs sm:text-sm bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700">
+                      <thead className="bg-gray-100 dark:bg-gray-700">
+                        <tr>
+                          <th className="text-left px-4 sm:px-6 py-2 sm:py-3 font-semibold text-gray-700 dark:text-gray-200 border-b border-gray-200 dark:border-gray-600 sort-id">Sale Group ID</th>
+                          <th className="text-left px-4 sm:px-6 py-2 sm:py-3 font-semibold text-gray-700 dark:text-gray-200 border-b border-gray-200 dark:border-gray-600">Total Amount</th>
+                          <th className="text-left px-4 sm:px-6 py-2 sm:py-3 font-semibold text-gray-700 dark:text-gray-200 border-b border-gray-200 dark:border-gray-600">Payment Method</th>
+                          <th className="text-left px-4 sm:px-6 py-2 sm:py-3 font-semibold text-gray-700 dark:text-gray-200 border-b border-gray-200 dark:border-gray-600">Date</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {paginatedSaleGroups.map(sg => (
+                          <tr
+                            key={sg.id}
+                            onClick={() => setSelectedSaleGroup(sg)}
+                            className={`cursor-pointer transition-colors ${
+                              selectedSaleGroup?.id === sg.id ? 'bg-indigo-50 dark:bg-gray-600' : 'hover:bg-gray-50 dark:hover:bg-gray-700'
+                            } even:bg-gray-50 dark:even:bg-gray-800`}
+                          >
+                            <td className="px-4 sm:px-6 py-3 sm:py-4 border-b border-gray-200 dark:border-gray-700">#{sg.id}</td>
+                            <td className="px-4 sm:px-6 py-3 sm:py-4 border-b border-gray-200 dark:border-gray-700">₦{sg.total_amount.toFixed(2)}</td>
+                            <td className="px-4 sm:px-6 py-3 sm:py-4 border-b border-gray-200 dark:border-gray-700">{sg.payment_method}</td>
+                            <td className="px-4 sm:px-6 py-3 sm:py-4 border-b border-gray-200 dark:border-gray-700">{new Date(sg.created_at).toLocaleDateString()}</td>
+                          </tr>
+                        ))}
+                        {paginatedSaleGroups.length === 0 && (
+                          <tr>
+                            <td colSpan="4" className="text-center text-gray-500 dark:text-gray-400 py-6">
+                              No sale groups found.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                  {filteredSaleGroups.length > saleGroupsPerPage && (
+                    <div className="flex items-center justify-between mt-4">
+                      <button
+                        onClick={() => handleSaleGroupsPageChange(currentPage - 1)}
+                        disabled={currentPage === 1}
+                        className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
+                      >
+                        Previous
+                      </button>
+                      <div className="flex gap-2">
+                        {Array.from({ length: totalSaleGroupsPages }, (_, i) => i + 1).map(page => (
+                          <button
+                            key={page}
+                            onClick={() => handleSaleGroupsPageChange(page)}
+                            className={`px-3 py-1 rounded-lg ${
+                              currentPage === page
+                                ? 'bg-indigo-600 text-white'
+                                : 'bg-gray-200 text-gray-700 hover:bg-gray-300 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700'
+                            }`}
+                          >
+                            {page}
+                          </button>
+                        ))}
+                      </div>
+                      <button
+                        onClick={() => handleSaleGroupsPageChange(currentPage + 1)}
+                        disabled={currentPage === totalSaleGroupsPages}
+                        className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-300 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
+                      >
+                        Next
+                      </button>
+                    </div>
+                  )}
+                </motion.div>
               )}
-            </div>
-          </label>
-        ))}
-      </div>
-      <div className="flex justify-end gap-2 sm:gap-3 mt-4">
-        <button
-          onClick={() => {
-            setEditing(null);
-            stopScanner();
-          }}
-          className="p-2 sm:p-3 bg-gray-500 text-white rounded-full shadow-sm hover:bg-gray-600 dark:bg-gray-600 dark:hover:bg-gray-500 transition-colors duration-200"
-          aria-label="Cancel edit form"
-        >
-          <svg
-            className="w-4 h-4 sm:w-5 sm:h-5"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-            xmlns="http://www.w3.org/2000/svg"
-          >
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        </button>
-        <button
-          onClick={saveEdit}
-          className="p-2 sm:p-3 bg-indigo-600 text-white rounded-full shadow-sm hover:bg-indigo-700 dark:bg-indigo-500 dark:hover:bg-indigo-600 transition-colors duration-200"
-          aria-label="Save product"
-        >
-          <svg
-            className="w-4 h-4 sm:w-5 sm:h-5"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-            xmlns="http://www.w3.org/2000/svg"
-          >
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
-          </svg>
-        </button>
-      </div>
-    </div>
-  </div>
-)}
-
-      {/* Scanner Modal */}
-    {showScanner && (
-  <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-     <div className="bg-white dark:bg-gray-900 p-6 rounded max-w-lg w-full">
-      <h2 className="text-xl font-bold mb-4 text-gray-800 dark:text-white">Scan Product ID</h2>
-      <div className="mb-4">
-        <label className="flex items-center space-x-2 text-sm font-medium text-gray-700 dark:text-gray-300">
-          <input
-            type="checkbox"
-            checked={externalScannerMode}
-            onChange={() => {
-              setExternalScannerMode((prev) => !prev);
-              setScannerError(null);
-              setScannerLoading(!externalScannerMode);
-              if (manualInputRef.current) {
-                manualInputRef.current.focus();
-              }
-            }}
-            className="h-4 w-4 text-indigo-600 border-gray-300 rounded dark:bg-gray-700 dark:border-gray-600"
-          />
-          <span>Use External Scanner</span>
-        </label>
-      </div>
-      {!externalScannerMode && (
-        <>
-          {scannerLoading && (
-            <div className="text-gray-600 dark:text-gray-400 text-center mb-3 text-xs xs:text-sm">
-              Initializing webcam scanner...
-            </div>
-          )}
-          {scannerError && (
-            <div className="text-red-600 dark:text-red-400 text-center mb-3 text-xs xs:text-sm font-medium">
-              {scannerError}
-            </div>
-          )}
-          <div className="mb-3 text-xs xs:text-sm text-gray-600 dark:text-gray-300 text-center">
-            <p className="mb-1">Point camera at barcode (~10–15 cm away).</p>
-            <p>Ensure good lighting and steady hands.</p>
-          </div>
-          <div
-            id="scanner"
-            ref={scannerDivRef}
-            className={`relative w-full h-[60vw] max-h-[320px] min-h-[180px] mb-3 bg-gray-100 dark:bg-gray-800 rounded-lg overflow-hidden ${
-              scanSuccess ? 'border-4 border-green-500' : ''
-            }`}
-          >
-            <video
-              ref={videoRef}
-              className="w-full h-full object-cover"
-              autoPlay
-              playsInline
-            />
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-              <div className="w-[85%] max-w-[280px] h-[80px] xs:h-[90px] sm:h-[100px] border-2 border-red-500 bg-transparent rounded-lg opacity-60"></div>
-            </div>
-          </div>
-        </>
-      )}        {externalScannerMode && (
-              <>
-                <div className="text-gray-600 dark:text-gray-400 mb-4">
-                  Waiting for external scanner to proceed... Scan a barcode to proceed.
+            </AnimatePresence>
+            {selectedSaleGroup && (
+              <motion.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: 'auto', opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                transition={{ duration: 0.3 }}
+                className="overflow-hidden mt-6"
+              >
+                <div ref={receiptsRef} className="overflow-x-auto rounded-lg shadow">
+                  <table className="min-w-full text-xs sm:text-sm bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700">
+                    <thead className="bg-gray-100 dark:bg-gray-700">
+                      <tr>
+                        <th className="text-left px-4 sm:px-6 py-2 sm:py-3 font-semibold text-gray-700 dark:text-gray-200 border-b border-gray-200 dark:border-gray-600">Receipt ID</th>
+                        <th className="text-left px-4 sm:px-6 py-2 sm:py-3 font-semibold text-gray-700 dark:text-gray-200 border-b border-gray-200 dark:border-gray-600">Customer</th>
+                        <th className="text-left px-4 sm:px-6 py-2 sm:py-3 font-semibold text-gray-700 dark:text-gray-200 border-b border-gray-200 dark:border-gray-600">Phone</th>
+                        <th className="text-left px-4 sm:px-6 py-2 sm:py-3 font-semibold text-gray-700 dark:text-gray-200 border-b border-gray-200 dark:border-gray-600">Warranty</th>
+                        <th className="text-left px-4 sm:px-6 py-2 sm:py-3 font-semibold text-gray-700 dark:text-gray-200 border-b border-gray-200 dark:border-gray-600">Date</th>
+                        <th className="text-left px-4 sm:px-6 py-2 sm:py-3 font-semibold text-gray-700 dark:text-gray-200 border-b border-gray-200 dark:border-gray-600">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {paginatedReceipts.map((receipt, index) => (
+                        <tr
+                          key={receipt.id}
+                          className="hover:bg-gray-50 dark:hover:bg-gray-700 even:bg-gray-50 dark:even:bg-gray-800 transition-colors"
+                        >
+                          <td className="px-4 sm:px-6 py-3 sm:py-4 border-b border-gray-200 dark:border-gray-700 truncate">{receipt.receipt_id}</td>
+                          <td className="px-4 sm:px-6 py-3 sm:py-4 border-b border-gray-200 dark:border-gray-700 truncate">{receipt.customer_name || '-'}</td>
+                          <td className="px-4 sm:px-6 py-3 sm:py-4 border-b border-gray-200 dark:border-gray-700 truncate">{receipt.phone_number || '-'}</td>
+                          <td className="px-4 sm:px-6 py-3 sm:py-4 border-b border-gray-200 dark:border-gray-700 truncate">{receipt.warranty || '-'}</td>
+                          <td className="px-4 sm:px-6 py-3 sm:py-4 border-b border-gray-200 dark:border-gray-700">{new Date(receipt.date).toLocaleDateString()}</td>
+                          <td className="px-4 sm:px-6 py-3 sm:py-4 border-b border-gray-200 dark:border-gray-700">
+                            <div className="flex gap-4">
+                              <button
+                                onClick={() => openEdit(receipt)}
+                                className={`text-indigo-600 hover:text-indigo-800 dark:text-indigo-400 dark:hover:text-indigo-300 edit-receipt-${index}`}
+                              >
+                                <FaEdit />
+                              </button>
+                              <button
+                                onClick={() => handleViewQRCode(receipt)}
+                                className={`text-purple-600 hover:text-purple-800 dark:text-purple-400 dark:hover:text-purple-300 flex items-center gap-2 generate-receipt-${index}`}
+                              >
+                                <FaQrcode /> View QR Code
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                      {paginatedReceipts.length === 0 && (
+                        <tr>
+                          <td colSpan="6" className="text-center text-gray-500 dark:text-gray-400 py-6">
+                            No receipts found.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
                 </div>
-                <div className="mb-4 px-2 sm:px-0">
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                    Or enter barcode manually
-                  </label>
-                  <div className="flex flex-col sm:flex-row gap-2">
-                    <input
-                      type="text"
-                      ref={manualInputRef}
-                      value={manualInput}
-                      onChange={(e) => setManualInput(e.target.value)}
-                      onKeyDown={handleManualInputKeyDown}
-                      placeholder="Enter barcode"
-                      className="p-2 border rounded dark:bg-gray-700 dark:border-gray-600 dark:text-white w-full sm:flex-1"
-                    />
+                {filteredReceipts.length > itemsPerPage && (
+                  <div className="flex items-center justify-between mt-4">
                     <button
-                      type="button"
-                      onClick={handleManualInput}
-                      className="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 w-full sm:w-auto"
+                      onClick={() => handlePageChange(currentPage - 1)}
+                      disabled={currentPage === 1}
+                      className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
                     >
-                      Submit
+                      Previous
+                    </button>
+                    <div className="flex gap-2">
+                      {Array.from({ length: totalPages }, (_, i) => i + 1).map(page => (
+                        <button
+                          key={page}
+                          onClick={() => handlePageChange(page)}
+                          className={`px-3 py-1 rounded-lg ${
+                            currentPage === page
+                              ? 'bg-indigo-600 text-white'
+                              : 'bg-gray-200 text-gray-700 hover:bg-gray-300 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700'
+                          }`}
+                        >
+                          {page}
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      onClick={() => handlePageChange(currentPage + 1)}
+                      disabled={currentPage === totalPages}
+                      className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-300 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
+                    >
+                      Next
                     </button>
                   </div>
-                </div>
-              </>
+                )}
+              </motion.div>
             )}
-
-            <div className="flex justify-end px-2 sm:px-4">
-              <button
-                type="button"
-                onClick={() => {
-                  stopScanner();
-                  setShowScanner(false);
-                  setScannerTarget(null);
-                  setScannerError(null);
-                  setScannerLoading(false);
-                  setManualInput('');
-                  setExternalScannerMode(false);
-                  setScannerBuffer('');
-                  setScanSuccess(false);
-                }}
-                className="w-full sm:w-auto px-4 py-2 bg-gray-200 rounded hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-white text-center"
-              >
-                Done
-              </button>
+          </>
+        )}
+        {(selectedReceipt || singleReceipt) && (
+          <div className={singleReceipt ? "p-4 sm:p-6 space-y-6 dark:bg-gray-900 dark:text-white w-full" : "fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4 sm:p-6 overflow-auto"}>
+            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-2xl w-full max-w-[95vw] sm:max-w-3xl flex flex-col max-h-[90vh]">
+              {!singleReceipt && (
+                <div className="flex justify-between items-center p-4 sm:p-6 border-b border-gray-200 dark:border-gray-700">
+                  <h2 className="text-lg sm:text-xl font-bold text-gray-800 dark:text-white">Receipt QR Code</h2>
+                  <button
+                    onClick={() => setSelectedReceipt(null)}
+                    className="px-3 sm:px-4 py-1.5 sm:py-2 bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 text-sm sm:text-base"
+                  >
+                    Close
+                  </button>
+                </div>
+              )}
+              <div className="flex-1 overflow-y-auto p-4 sm:p-6">
+                <div className="flex flex-col items-center gap-4 mb-6">
+                  <p className="text-gray-600 dark:text-gray-400 text-sm sm:text-base text-center">
+                    Scan the QR code below to view and download the receipt.
+                  </p>
+                  <QRCodeCanvas value={qrCodeUrl} size={150} className="w-[120px] sm:w-[150px] h-auto" />
+                  <button
+                    onClick={generatePDF}
+                    className="px-3 sm:px-4 py-1.5 sm:py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 flex items-center gap-2 text-sm sm:text-base"
+                  >
+                    <FaDownload /> Download Receipt
+                  </button>
+                </div>
+                <div ref={printRef} className="printable-area relative bg-white p-4 sm:p-6 shadow-lg rounded-lg w-full">
+                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none" style={{ color: watermarkColor, fontSize: '2rem sm:4rem', opacity: 0.1 }}>
+                    <span className={`${bodyFont}`}>{store?.shop_name || '-'}</span>
+                  </div>
+                  <div className={`p-3 sm:p-4 rounded-t ${headerFont}`} style={{ backgroundColor: headerBgColor, color: headerTextColor }}>
+                    <h1 className="text-lg sm:text-2xl font-bold">{store?.shop_name || '-'}</h1>
+                    <p className="text-xs sm:text-sm">{store?.business_address || '-'}</p>
+                    <p className="text-xs sm:text-sm">Phone: {store?.phone_number || '-'}</p>
+                    <p className="text-xs sm:text-sm">Email: {store?.email_address || '-'}</p>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className={`w-full border-none mb-4 mt-4 ${bodyFont} text-xs sm:text-sm`}>
+                      <thead>
+                        <tr className="hidden sm:table-row">
+                          <th className="border px-2 sm:px-4 py-1 sm:py-2 text-left">Product</th>
+                          <th className="border px-2 sm:px-4 py-1 sm:py-2 text-left">Device ID</th>
+                          <th className="border px-2 sm:px-4 py-1 sm:py-2 text-left">Qty</th>
+                          <th className="border px-2 sm:px-4 py-1 sm:py-2 text-left">Unit Price</th>
+                          <th className="border px-2 sm:px-4 py-1 sm:py-2 text-left">Amount</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {productGroups.map((group, index) => (
+                          <React.Fragment key={group.productId}>
+                            <tr className="flex flex-col sm:table-row border-b sm:border-b-0 sm:bg-indigo-50 sm:dark:bg-gray-800">
+                              <td className="border-b px-2 sm:px-4 py-1 sm:py-2 font-bold sm:font-normal flex sm:table-cell sm:border-b">
+                                <span className="sm:hidden font-semibold mr-2">Product:</span>
+                                {group.productName}
+                              </td>
+                              <td className="border-b px-2 sm:px-4 py-1 sm:py-2 sm:pl-6 flex sm:table-cell sm:border-b">
+                                <span className="sm:hidden font-semibold mr-2">Device ID:</span>
+                                {group.deviceIds.length > 0 ? group.deviceIds.join(', ') : '-'}
+                              </td>
+                              <td className="border-b px-2 sm:px-4 py-1 sm:py-2 flex sm:table-cell sm:border-b">
+                                <span className="sm:hidden font-semibold mr-2">Quantity:</span>
+                                {group.quantity}
+                              </td>
+                              <td className="border-b px-2 sm:px-4 py-1 sm:py-2 flex sm:table-cell sm:border-b">
+                                <span className="sm:hidden font-semibold mr-2">Unit Price:</span>
+                                ₦{group.unitPrice.toFixed(2)}
+                              </td>
+                              <td className="border-b px-2 sm:px-4 py-1 sm:py-2 flex sm:table-cell sm:border-b">
+                                <span className="sm:hidden font-semibold mr-2">Amount:</span>
+                                ₦{group.totalAmount.toFixed(2)}
+                              </td>
+                            </tr>
+                          </React.Fragment>
+                        ))}
+                      </tbody>
+                      <tfoot>
+                        <tr className="flex flex-col sm:table-row">
+                          <td colSpan="2" className="border px-2 sm:px-4 py-1 sm:py-2 text-right font-bold flex sm:table-cell sm:border-b">
+                            <span className="sm:hidden font-semibold mr-2">Total:</span>
+                          </td>
+                          <td className="border px-2 sm:px-4 py-1 sm:py-2 flex sm:table-cell sm:border-b">
+                            <span className="sm:hidden font-semibold mr-2">Total Quantity:</span>
+                            {totalQuantity}
+                          </td>
+                          <td className="border px-2 sm:px-4 py-1 sm:py-2 flex sm:table-cell sm:border-b"></td>
+                          <td className="border px-2 sm:px-4 py-1 sm:py-2 font-bold flex sm:table-cell sm:border-b">
+                            <span className="sm:hidden font-semibold mr-2">Total Amount:</span>
+                            ₦{totalAmount.toFixed(2)}
+                          </td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                  <div className="mt-4 space-y-2 text-xs sm:text-sm">
+                    <p><strong>Receipt ID:</strong> {selectedReceipt.receipt_id}</p>
+                    <p><strong>Date:</strong> {new Date(selectedSaleGroup?.created_at).toLocaleString()}</p>
+                    <p><strong>Payment Method:</strong> {selectedSaleGroup?.payment_method}</p>
+                    <p><strong>Customer Name:</strong> {selectedReceipt.customer_name || '-'}</p>
+                    <p><strong>Address:</strong> {selectedReceipt.customer_address || '-'}</p>
+                    <p><strong>Phone:</strong> {selectedReceipt.phone_number || '-'}</p>
+                    <p><strong>Warranty:</strong> {selectedReceipt.warranty || '-'}</p>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-8 p-4 mt-4">
+                    <div className="border-t text-center pt-2 text-xs sm:text-sm">Manager Signature</div>
+                    <div className="border-t text-center pt-2 text-xs sm:text-sm">Customer Signature</div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
-        </div>
-      )}
-
-      {/* Onboarding Tooltip */}
-      {showOnboarding && onboardingStep < onboardingSteps.length && (
-        <motion.div
-          className="fixed z-50 bg-indigo-600 dark:bg-gray-900 border rounded-lg shadow-lg p-4 max-w-xs"
-          style={getTooltipPosition(onboardingSteps[onboardingStep].target)}
-          variants={tooltipVariants}
-          initial="hidden"
-          animate="visible"
-        >
-          <p className="text-sm text-white dark:text-gray-300 mb-2">
-            {onboardingSteps[onboardingStep].content}
-          </p>
-          <div className="flex justify-between items-center">
-            <span className="text-sm text-gray-200">
-              Step {onboardingStep + 1} of {onboardingSteps.length}
-            </span>
-            <div className="space-x-2">
-              <button
-                onClick={handleSkipOnboarding}
-                className="text-sm text-gray-300 hover:text-gray-800 dark:text-gray-300"
-              >
-                Skip
-              </button>
-              <button
-                onClick={handleNextStep}
-                className="bg-indigo-600 hover:bg-indigo-700 text-white py-1 px-3 rounded"
-              >
-                {onboardingStep + 1 === onboardingSteps.length ? 'Finish' : 'Next'}
-              </button>
+        )}
+        {editing && (
+          <div className="fixed inset-0 bg-black bg-opacity_priv-0 flex items-start justify-center p-4 z-50 overflow-auto mt-10">
+            <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-8 space-y-6">
+              <h2 className="text-2xl font-bold text-center text-gray-800 dark:text-white">Edit Receipt {editing.receipt_id}</h2>
+              <div className="space-y-4">
+                {['customer_name', 'customer_address', 'phone_number', 'warranty'].map(field => (
+                  <label key={field} className="block">
+                    <span className="font-semibold text-gray-700 dark:text-gray-200 capitalize block mb-1">
+                      {field.replace('_', ' ')}
+                    </span>
+                    <input
+                      name={field}
+                      value={form[field]}
+                      onChange={handleChange}
+                      className="border border-gray-300 dark:border-gray-600 px-4 py-2 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:bg-gray-900 dark:text-white"
+                    />
+                  </label>
+                ))}
+              </div>
+              <div className="flex justify-end gap-3 mt-6">
+                <button onClick={() => setEditing(null)} className="px-4 py-2 bg-gray-200 dark:bg-gray-800 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-700">Cancel</button>
+                <button onClick={saveReceipt} className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 flex items-center justify-between gap-2">
+                  <FaDownload /> Save Receipt
+                </button>
+              </div>
             </div>
           </div>
-        </motion.div>
-      )}
-    </div>
+        )}
+        {showOnboarding && (
+          <motion.div
+            className="fixed z-50 bg-indigo-600 text-white p-4 rounded-lg shadow-lg"
+            style={getTooltipPosition(onboardingSteps[onboardingStep].target)}
+            variants={tooltipVariants}
+            initial="hidden"
+            animate="visible"
+          >
+            <p>{onboardingSteps[onboardingStep].content}</p>
+            <div className="flex justify-end gap-2 mt-2">
+              <button onClick={handleSkipOnboarding} className="text-sm underline">Skip</button>
+              <button onClick={handleNextStep} className="bg-white text-indigo-600 px-3 py-1 rounded-lg">
+                {onboardingStep < onboardingSteps.length - 1 ? 'Next' : 'Finish'}
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </div>
+    </>
   );
 }

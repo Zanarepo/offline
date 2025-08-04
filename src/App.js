@@ -32,16 +32,10 @@ import Tests from './component/UserDashboard/Tests';
 import ReceiptQRCode from "./component/VariexContents/ReceiptQRCode";
 import ReceiptQRCodeWrapper from "./component/VariexContents/ReceiptQRCodeWrapper";
 
-import { syncAll } from './services/syncService'; // ✅ Import sync logic
 
 const App = () => {
   useEffect(() => {
-    // ✅ Sync on load if online, and on reconnect
-    window.addEventListener('online', syncAll);
-    if (navigator.onLine) {
-      syncAll();
-    }
-    return () => window.removeEventListener('online', syncAll);
+
   }, []);
 
   return (
